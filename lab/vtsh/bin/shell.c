@@ -131,14 +131,13 @@ int execute_command(char** argv) {
   calculate_timespec_diff(&start_time, &end_time, &duration);
   double elapsed = duration.tv_sec + duration.tv_nsec / (double)NSEC_PER_SEC;
     if (WIFEXITED(status)) {
-      /* Always print exit status and elapsed time so tests and non-TTY
-         invocations receive timing information. */
-      printf("exit status: %d; elapsed: %.6f s\n", WEXITSTATUS(status), elapsed);
+    /* Always print exit status and elapsed time to stdout. */
+    printf("exit status: %d; elapsed: %.6f s\n", WEXITSTATUS(status), elapsed);
       return WEXITSTATUS(status);
     }
 
   if (WIFSIGNALED(status)) {
-    /* Also always print signal termination and elapsed time. */
+    /* Always print termination info to stdout. */
     printf("terminated by signal %d; elapsed: %.6f s\n", WTERMSIG(status), elapsed);
     return 128 + WTERMSIG(status);
   }

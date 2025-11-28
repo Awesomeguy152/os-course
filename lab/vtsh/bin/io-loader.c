@@ -12,6 +12,8 @@
 #include <time.h>
 #include <unistd.h>
 
+#define NSEC_PER_SEC 1000000000L
+
 /* If the platform doesn't define O_DIRECT (e.g. macOS), provide a
   safe no-op definition so code that ORs flags with O_DIRECT still
   compiles. Prefer platform-specific fallbacks (F_NOCACHE on macOS)
@@ -294,6 +296,8 @@ int main(int argc, char** argv) {
   size_t block_index_iter = 0;
   for (repetition_index = 0; repetition_index < repetitions_total;
        ++repetition_index) {
+    struct timespec _start_iter, _end_iter, _diff_iter;
+    clock_gettime(CLOCK_MONOTONIC, &_start_iter);
     printf("IO: Iteration %d: ", repetition_index + 1);
     for (block_index_iter = 0; block_index_iter < block_count_total;
          ++block_index_iter) {
@@ -329,6 +333,15 @@ int main(int argc, char** argv) {
         }
       }
     }
+    clock_gettime(CLOCK_MONOTONIC, &_end_iter);
+    _diff_iter.tv_sec = _end_iter.tv_sec - _start_iter.tv_sec;
+    _diff_iter.tv_nsec = _end_iter.tv_nsec - _start_iter.tv_nsec;
+    if (_diff_iter.tv_nsec < 0) {
+      _diff_iter.tv_sec -= 1;
+      _diff_iter.tv_nsec += NSEC_PER_SEC;
+    }
+    double elapsed_iter = _diff_iter.tv_sec + _diff_iter.tv_nsec / (double)NSEC_PER_SEC;
+    printf("elapsed: %.6f s\n", elapsed_iter);
   }
 
   /* -------------------- Завершение -------------------- */

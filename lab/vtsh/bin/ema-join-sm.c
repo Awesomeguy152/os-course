@@ -17,6 +17,9 @@
 #include <string.h>
 
 #include "ema-join-sm.h"
+#include <time.h>
+
+#define NSEC_PER_SEC 1000000000L
 
 /* =======================================================================
  *                          КОНСТАНТЫ
@@ -125,6 +128,8 @@ int main(int argc, char** argv) {
 
   int idx_iter = 0;
   for (idx_iter = 0; idx_iter < num_repetitions; idx_iter++) {
+    struct timespec _start_iter, _end_iter, _diff_iter;
+    clock_gettime(CLOCK_MONOTONIC, &_start_iter);
     printf("EMA: Iteration %d: ", idx_iter + 1);
 
     size_t left_table_size = 0;
@@ -258,6 +263,16 @@ int main(int argc, char** argv) {
     }
 
     printf("Join produced %zu rows\n", result_rows_count);
+
+    clock_gettime(CLOCK_MONOTONIC, &_end_iter);
+    _diff_iter.tv_sec = _end_iter.tv_sec - _start_iter.tv_sec;
+    _diff_iter.tv_nsec = _end_iter.tv_nsec - _start_iter.tv_nsec;
+    if (_diff_iter.tv_nsec < 0) {
+      _diff_iter.tv_sec -= 1;
+      _diff_iter.tv_nsec += NSEC_PER_SEC;
+    }
+    double elapsed_iter = _diff_iter.tv_sec + _diff_iter.tv_nsec / (double)NSEC_PER_SEC;
+    printf("elapsed: %.6f s\n", elapsed_iter);
 
     /** освобождаем ресурсы */
     fclose(output_file_handle);

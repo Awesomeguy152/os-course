@@ -1,5 +1,8 @@
 #include "../lib/cpu-sort.h"
 #include <stdio.h>
+#include <time.h>
+
+#define NSEC_PER_SEC 1000000000L
 
 /* Быстрая сортировка (N*logN) */
 void quick_sort(int *arr, int left, int right) {
@@ -31,6 +34,8 @@ void bubble_sort(int *arr, int n) {
 
 
 int main() {
+    struct timespec _start, _end, _diff;
+    clock_gettime(CLOCK_MONOTONIC, &_start);
     int arr1[] = {5, 2, 9, 1, 5, 6};
     int n = sizeof(arr1)/sizeof(arr1[0]);
     quick_sort(arr1, 0, n-1);
@@ -43,5 +48,14 @@ int main() {
     printf("Bubble sort: ");
     for (int i = 0; i < n; ++i) printf("%d ", arr2[i]);
     printf("\n");
+    clock_gettime(CLOCK_MONOTONIC, &_end);
+    _diff.tv_sec = _end.tv_sec - _start.tv_sec;
+    _diff.tv_nsec = _end.tv_nsec - _start.tv_nsec;
+    if (_diff.tv_nsec < 0) {
+        _diff.tv_sec -= 1;
+        _diff.tv_nsec += NSEC_PER_SEC;
+    }
+    double elapsed = _diff.tv_sec + _diff.tv_nsec / (double)NSEC_PER_SEC;
+    printf("elapsed: %.6f s\n", elapsed);
     return 0;
 }
