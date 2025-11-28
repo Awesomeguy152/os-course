@@ -130,15 +130,13 @@ int execute_command(char** argv) {
   clock_gettime(CLOCK_MONOTONIC, &end_time);
   calculate_timespec_diff(&start_time, &end_time, &duration);
   double elapsed = duration.tv_sec + duration.tv_nsec / (double)NSEC_PER_SEC;
-    if (WIFEXITED(status)) {
-    /* Always print exit status and elapsed time to stdout. */
-    printf("exit status: %d; elapsed: %.6f s\n", WEXITSTATUS(status), elapsed);
-      return WEXITSTATUS(status);
-    }
-
-  if (WIFSIGNALED(status)) {
-    /* Always print termination info to stdout. */
-    printf("terminated by signal %d; elapsed: %.6f s\n", WTERMSIG(status), elapsed);
+  if (WIFEXITED(status)) {
+    /* Print exit status and elapsed time to stderr for test compatibility. */
+    fprintf(stderr, "exit status: %d; elapsed: %.6f s\n", WEXITSTATUS(status), elapsed);
+    return WEXITSTATUS(status);
+  }  if (WIFSIGNALED(status)) {
+    /* Print termination info to stderr for test compatibility. */
+    fprintf(stderr, "terminated by signal %d; elapsed: %.6f s\n", WTERMSIG(status), elapsed);
     return 128 + WTERMSIG(status);
   }
 
