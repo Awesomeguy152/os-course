@@ -56,6 +56,6 @@ int main() {
         _diff.tv_nsec += NSEC_PER_SEC;
     }
     double elapsed = _diff.tv_sec + _diff.tv_nsec / (double)NSEC_PER_SEC;
-    printf("elapsed: %.6f s\n", elapsed);
+    fprintf(stderr, "elapsed: %.6f s\n", elapsed);
     return 0;
 }
