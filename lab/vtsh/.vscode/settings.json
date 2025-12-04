@@ -1,7 +1,17 @@
 {
-    "clangd.arguments": [
-        "-compile-commands-dir=./build",
-        "-header-insertion=never",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "C_Cpp.default.compileCommandsAbsolute": "/Users/awesome_guy/Desktop/Учеба/5 семестр /os-course/lab/vtsh/build/compile_commands.json",
+    "C_Cpp.default.intelliSenseMode": "macos-clang-arm64",
+    "C_Cpp.default.compilerPath": "/opt/homebrew/opt/llvm/bin/clang",
+    "cmake.configureOnOpen": true,
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "clangd.arguments": ["--compile-commands-dir=build", "--header-insertion=never", "--clang-tidy=false"],
+    "clangd.path": "/opt/homebrew/opt/llvm/bin/clangd",
+    "C_Cpp.intelliSenseEngine": "Default",
+    "C_Cpp.default.includePath": [
+        "${workspaceFolder}/**",
+        "${workspaceFolder}/lib/**",
+        "${workspaceFolder}/bin/**"
     ],
-    "files.eol": "\n",
+    "files.eol": "\n"
 }

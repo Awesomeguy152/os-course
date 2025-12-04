@@ -2,7 +2,9 @@
 #define _BSD_SOURCE
 #include "shell.h"
 
+#include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -68,6 +70,137 @@ char** parse_command_line(char* line, int* argc_out) {
   return argv;
 }
 
+/* ========== Структуры и функции для редиректов и переменных ========== */
+
+typedef struct {
+  int stdin_fd;
+  int stdout_fd;
+  int stderr_fd;
+} redirect_info_t;
+
+redirect_info_t apply_redirects(char** argv, int* argc_ptr) {
+  redirect_info_t redir = {-1, -1, -1};
+  int new_argc = 0;
+  
+  for (int i = 0; argv[i] != NULL; ++i) {
+    if (strcmp(argv[i], ">") == 0) {
+      if (argv[i + 1] == NULL) {
+        fprintf(stderr, "Error: > requires a filename\n");
+        return redir;
+      }
+      int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (fd < 0) {
+        perror("open >");
+        return redir;
+      }
+      redir.stdout_fd = fd;
+      ++i;
+      continue;
+    }
+    
+    if (strcmp(argv[i], ">>") == 0) {
+      if (argv[i + 1] == NULL) {
+        fprintf(stderr, "Error: >> requires a filename\n");
+        return redir;
+      }
+      int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+      if (fd < 0) {
+        perror("open >>");
+        return redir;
+      }
+      redir.stdout_fd = fd;
+      ++i;
+      continue;
+    }
+    
+    if (strcmp(argv[i], "<") == 0) {
+      if (argv[i + 1] == NULL) {
+        fprintf(stderr, "Error: < requires a filename\n");
+        return redir;
+      }
+      int fd = open(argv[i + 1], O_RDONLY);
+      if (fd < 0) {
+        perror("open <");
+        return redir;
+      }
+      redir.stdin_fd = fd;
+      ++i;
+      continue;
+    }
+    
+    argv[new_argc++] = argv[i];
+  }
+  
+  argv[new_argc] = NULL;
+  if (argc_ptr) {
+    *argc_ptr = new_argc;
+  }
+  return redir;
+}
+
+char** expand_env_vars(char** argv, int argc) {
+  char** expanded_argv = malloc((argc + 1) * sizeof(char*));
+  if (!expanded_argv) {
+    perror("malloc");
+    return argv;
+  }
+  
+  for (int i = 0; i < argc; ++i) {
+    const char* arg = argv[i];
+    const char* dollar_pos = strchr(arg, '$');
+    
+    if (!dollar_pos) {
+      expanded_argv[i] = argv[i];
+      continue;
+    }
+    
+    size_t var_name_len = 0;
+    const char* var_start = dollar_pos + 1;
+    while (var_start[var_name_len] && 
+           (isalnum((unsigned char)var_start[var_name_len]) || var_start[var_name_len] == '_')) {
+      ++var_name_len;
+    }
+    
+    if (var_name_len == 0) {
+      expanded_argv[i] = argv[i];
+      continue;
+    }
+    
+    char var_name[256];
+    if (var_name_len >= sizeof(var_name)) {
+      var_name_len = sizeof(var_name) - 1;
+    }
+    strncpy(var_name, var_start, var_name_len);
+    var_name[var_name_len] = '\0';
+    
+    const char* var_value = getenv(var_name);
+    if (!var_value) {
+      var_value = "";
+    }
+    
+    size_t prefix_len = dollar_pos - arg;
+    const char* suffix = var_start + var_name_len;
+    size_t suffix_len = strlen(suffix);
+    size_t total_len = prefix_len + strlen(var_value) + suffix_len + 1;
+    
+    char* expanded = malloc(total_len);
+    if (!expanded) {
+      perror("malloc");
+      expanded_argv[i] = argv[i];
+      continue;
+    }
+    
+    strncpy(expanded, arg, prefix_len);
+    strcpy(expanded + prefix_len, var_value);
+    strcpy(expanded + prefix_len + strlen(var_value), suffix);
+    
+    expanded_argv[i] = expanded;
+  }
+  
+  expanded_argv[argc] = NULL;
+  return expanded_argv;
+}
+
 /** ------------------------------------------------------------
  *  run_shell:
  *  Главный цикл оболочки — вынесен отдельно, чтобы не вызывать main()
@@ -105,6 +238,20 @@ int execute_command(char** argv) {
     return 0;
   }
 
+  /** ---- Обработка редиректов ---- */
+  int argc_temp = 0;
+  for (int i = 0; argv[i] != NULL; ++i) {
+    ++argc_temp;
+  }
+  redirect_info_t redir = apply_redirects(argv, &argc_temp);
+  
+  if (argc_temp == 0 || argv[0] == NULL) {
+    if (redir.stdin_fd >= 0) close(redir.stdin_fd);
+    if (redir.stdout_fd >= 0) close(redir.stdout_fd);
+    if (redir.stderr_fd >= 0) close(redir.stderr_fd);
+    return EXIT_FAILURE_CODE;
+  }
+
   /** ---- Измеряем время выполнения ---- */
   struct timespec start_time, end_time, duration;
   clock_gettime(CLOCK_MONOTONIC, &start_time);
@@ -113,11 +260,27 @@ int execute_command(char** argv) {
   pid_t pid = vfork();
   if (pid < 0) {
     perror("vfork");
+    if (redir.stdin_fd >= 0) close(redir.stdin_fd);
+    if (redir.stdout_fd >= 0) close(redir.stdout_fd);
+    if (redir.stderr_fd >= 0) close(redir.stderr_fd);
     return EXIT_FAILURE_CODE;
   }
 
   /** ---- Код дочернего процесса ---- */
   if (pid == 0) {
+    if (redir.stdin_fd >= 0) {
+      dup2(redir.stdin_fd, STDIN_FILENO);
+      close(redir.stdin_fd);
+    }
+    if (redir.stdout_fd >= 0) {
+      dup2(redir.stdout_fd, STDOUT_FILENO);
+      close(redir.stdout_fd);
+    }
+    if (redir.stderr_fd >= 0) {
+      dup2(redir.stderr_fd, STDERR_FILENO);
+      close(redir.stderr_fd);
+    }
+    
     execvp(argv[0], argv);
     const char msg[] = "Command not found\n";
     write(STDOUT_FILENO, msg, sizeof(msg) - 1);
@@ -127,6 +290,10 @@ int execute_command(char** argv) {
   /** ---- Код родителя ---- */
   int status = 0;
   waitpid(pid, &status, 0);
+  
+  if (redir.stdin_fd >= 0) close(redir.stdin_fd);
+  if (redir.stdout_fd >= 0) close(redir.stdout_fd);
+  if (redir.stderr_fd >= 0) close(redir.stderr_fd);
 
   clock_gettime(CLOCK_MONOTONIC, &end_time);
   calculate_timespec_diff(&start_time, &end_time, &duration);
@@ -161,7 +328,18 @@ int execute_single_command(char* command) {
     return 0;
   }
 
-  int status = execute_command(argv);
+  char** expanded_argv = expand_env_vars(argv, argc);
+  int status = execute_command(expanded_argv);
+  
+  if (expanded_argv != argv) {
+    for (int i = 0; i < argc; ++i) {
+      if (expanded_argv[i] != argv[i]) {
+        free(expanded_argv[i]);
+      }
+    }
+    free(expanded_argv);
+  }
+  
   free(argv);
   return status;
 }
