@@ -7,7 +7,10 @@ from shell import Shell
 
 class BaseShellTest(TestCase):
     def setUp(self):
-        self.shell = Shell("../build/bin/vtsh")
+        # Get the absolute path to the shell binary
+        shell_path = os.path.join(os.path.dirname(__file__), "../build/bin/vtsh")
+        shell_path = os.path.abspath(shell_path)
+        self.shell = Shell(shell_path)
         self.test_files = set()
 
     def tearDown(self):
