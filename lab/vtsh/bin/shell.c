@@ -55,12 +55,58 @@ char** parse_command_line(char* line, int* argc_out) {
   }
 
   int argc = 0;
-  char* saveptr = NULL;
-  char* token = strtok_r(line, " \t\r\n", &saveptr);
-
-  while (token && argc < MAX_ARGS) {
-    argv[argc++] = token;
-    token = strtok_r(NULL, " \t\r\n", &saveptr);
+  char* p = line;
+  
+  while (*p && argc < MAX_ARGS) {
+    /* Пропускаем пробелы */
+    while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
+      ++p;
+    }
+    
+    if (*p == '\0') break;
+    
+    /* Проверяем специальные операторы */
+    if (strncmp(p, "2>&1", 4) == 0 && (p[4] == '\0' || p[4] == ' ' || p[4] == '\t')) {
+      argv[argc++] = "2>&1";
+      p += 4;
+      continue;
+    }
+    
+    if (strncmp(p, ">>", 2) == 0 && (p[2] == '\0' || p[2] == ' ' || p[2] == '\t')) {
+      argv[argc++] = ">>";
+      p += 2;
+      continue;
+    }
+    
+    if ((*p == '>' || *p == '<' || *p == '|' || *p == '&') && 
+        (p[1] == '\0' || p[1] == ' ' || p[1] == '\t' || p[1] == '\r' || p[1] == '\n')) {
+      if (*p == '>') {
+        argv[argc++] = ">";
+      } else if (*p == '<') {
+        argv[argc++] = "<";
+      } else if (*p == '|') {
+        argv[argc++] = "|";
+      } else if (*p == '&') {
+        argv[argc++] = "&";
+      }
+      ++p;
+      continue;
+    }
+    
+    /* Обычный аргумент */
+    char* token_start = p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' &&
+           *p != '>' && *p != '<' && *p != '|' && *p != '&') {
+      ++p;
+    }
+    
+    size_t len = p - token_start;
+    char* token = malloc(len + 1);
+    if (token) {
+      strncpy(token, token_start, len);
+      token[len] = '\0';
+      argv[argc++] = token;
+    }
   }
 
   argv[argc] = NULL;
@@ -76,10 +122,11 @@ typedef struct {
   int stdin_fd;
   int stdout_fd;
   int stderr_fd;
+  int redirect_stderr_to_stdout;  /* 1 if 2>&1 */
 } redirect_info_t;
 
 redirect_info_t apply_redirects(char** argv, int* argc_ptr) {
-  redirect_info_t redir = {-1, -1, -1};
+  redirect_info_t redir = {-1, -1, -1, 0};
   int new_argc = 0;
   
   for (int i = 0; argv[i] != NULL; ++i) {
@@ -126,6 +173,11 @@ redirect_info_t apply_redirects(char** argv, int* argc_ptr) {
       redir.stdin_fd = fd;
       ++i;
       continue;
+    }
+    
+    if (strcmp(argv[i], "2>&1") == 0) {
+      redir.redirect_stderr_to_stdout = 1;
+      continue;  /* Пропускаем этот аргумент (не добавляем в argv) */
     }
     
     argv[new_argc++] = argv[i];
@@ -199,6 +251,168 @@ char** expand_env_vars(char** argv, int argc) {
   
   expanded_argv[argc] = NULL;
   return expanded_argv;
+}
+
+/* ========== Функция для обработки конвейера (pipe) ========== */
+
+int has_pipe(char* line) {
+  return strchr(line, '|') != NULL;
+}
+
+int has_background(char* line) {
+  const char* ptr = line;
+  while (*ptr) {
+    if (*ptr == '&') {
+      return 1;
+    }
+    ++ptr;
+  }
+  return 0;
+}
+
+void execute_pipeline(char* line) {
+  /* Копируем строку, так как стrtok модифицирует её */
+  char* line_copy = malloc(strlen(line) + 1);
+  if (!line_copy) {
+    perror("malloc");
+    return;
+  }
+  strcpy(line_copy, line);
+  
+  /* Подсчитываем количество команд (разделены |) */
+  int cmd_count = 1;
+  for (int i = 0; line_copy[i]; ++i) {
+    if (line_copy[i] == '|') {
+      ++cmd_count;
+    }
+  }
+  
+  /* Выделяем память для команд */
+  char** commands = malloc(cmd_count * sizeof(char*));
+  if (!commands) {
+    perror("malloc");
+    free(line_copy);
+    return;
+  }
+  
+  /* Разбиваем на команды */
+  char* saveptr = NULL;
+  char* cmd = strtok_r(line_copy, "|", &saveptr);
+  int idx = 0;
+  while (cmd && idx < cmd_count) {
+    /* Пропускаем пробелы в начале */
+    while (*cmd && (*cmd == ' ' || *cmd == '\t')) {
+      ++cmd;
+    }
+    commands[idx++] = cmd;
+    cmd = strtok_r(NULL, "|", &saveptr);
+  }
+  
+  /* Массив для хранения PID дочерних процессов */
+  pid_t* pids = malloc(cmd_count * sizeof(pid_t));
+  if (!pids) {
+    perror("malloc");
+    free(commands);
+    free(line_copy);
+    return;
+  }
+  
+  int prev_pipe_read = -1;
+  
+  for (int i = 0; i < cmd_count; ++i) {
+    int pipe_fds[2];
+    
+    /* Создаём трубу для всех команд кроме последней */
+    if (i < cmd_count - 1) {
+      if (pipe(pipe_fds) < 0) {
+        perror("pipe");
+        free(pids);
+        free(commands);
+        free(line_copy);
+        return;
+      }
+    }
+    
+    /* Парсим текущую команду */
+    int argc = 0;
+    char** argv = parse_command_line(commands[i], &argc);
+    if (!argv || argc == 0) {
+      free(argv);
+      if (i < cmd_count - 1) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+      }
+      continue;
+    }
+    
+    /* Расширяем переменные окружения */
+    char** expanded_argv = expand_env_vars(argv, argc);
+    
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("fork");
+      free(expanded_argv);
+      if (expanded_argv != argv) free(argv);
+      if (i < cmd_count - 1) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+      }
+      continue;
+    }
+    
+    if (pid == 0) {
+      /* Дочерний процесс */
+      
+      /* Перенаправляем stdin из предыдущей трубы (если не первая команда) */
+      if (prev_pipe_read != -1) {
+        dup2(prev_pipe_read, STDIN_FILENO);
+        close(prev_pipe_read);
+      }
+      
+      /* Перенаправляем stdout в трубу (если не последняя команда) */
+      if (i < cmd_count - 1) {
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+      }
+      
+      execvp(expanded_argv[0], expanded_argv);
+      perror(expanded_argv[0]);
+      _exit(EXIT_FAILURE_CODE);
+    }
+    
+    /* Родительский процесс */
+    pids[i] = pid;
+    
+    /* Закрываем дескрипторы в родителе */
+    if (prev_pipe_read != -1) {
+      close(prev_pipe_read);
+    }
+    if (i < cmd_count - 1) {
+      close(pipe_fds[1]);
+      prev_pipe_read = pipe_fds[0];
+    }
+    
+    if (expanded_argv != argv) {
+      for (int j = 0; j < argc; ++j) {
+        if (expanded_argv[j] != argv[j]) {
+          free(expanded_argv[j]);
+        }
+      }
+      free(expanded_argv);
+    }
+    free(argv);
+  }
+  
+  /* Ждём завершения всех процессов в конвейере */
+  for (int i = 0; i < cmd_count; ++i) {
+    int status;
+    waitpid(pids[i], &status, 0);
+  }
+  
+  free(pids);
+  free(commands);
+  free(line_copy);
 }
 
 /** ------------------------------------------------------------
@@ -279,6 +493,8 @@ int execute_command(char** argv) {
     if (redir.stderr_fd >= 0) {
       dup2(redir.stderr_fd, STDERR_FILENO);
       close(redir.stderr_fd);
+    } else if (redir.redirect_stderr_to_stdout) {
+      dup2(STDOUT_FILENO, STDERR_FILENO);
     }
     
     execvp(argv[0], argv);
@@ -347,25 +563,124 @@ int execute_single_command(char* command) {
 /** ------------------------------------------------------------
  *  execute_with_and:
  *  Выполняет несколько команд, разделенных оператором "&&".
+ *  Также поддерживает фоновое выполнение (&) в конце командной строки.
  * ------------------------------------------------------------ */
 void execute_with_and(char* line) {
-  char* saveptr = NULL;
-  char* current_cmd = strtok_r(line, "&", &saveptr);
+  /* Проверяем, есть ли & в конце (фоновое выполнение) */
+  int run_background = 0;
+  size_t len = strlen(line);
+  if (len > 0 && line[len - 1] == '&') {
+    /* Проверяем, это не && */
+    if (len == 1 || line[len - 2] != '&') {
+      run_background = 1;
+      line[len - 1] = '\0';  /* Удаляем & */
+      /* Пропускаем пробелы перед & */
+      len--;
+      while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t')) {
+        line[--len] = '\0';
+      }
+    }
+  }
+  
+  /* Разбиваем на команды по && */
+  int cmd_count = 1;
+  for (size_t i = 0; i < len; ++i) {
+    if (i < len - 1 && line[i] == '&' && line[i + 1] == '&') {
+      ++cmd_count;
+    }
+  }
+  
+  char** commands = malloc((cmd_count + 1) * sizeof(char*));
+  if (!commands) {
+    perror("malloc");
+    return;
+  }
+  
+  /* Извлекаем команды */
+  int cmd_idx = 0;
+  char* cmd_start = line;
+  for (size_t i = 0; i <= len; ++i) {
+    if (i < len && i < len - 1 && line[i] == '&' && line[i + 1] == '&') {
+      /* Найден && */
+      line[i] = '\0';
+      commands[cmd_idx++] = cmd_start;
+      i += 1;  /* Пропускаем второй & */
+      cmd_start = &line[i + 1];
+      i++;
+    } else if (i == len) {
+      /* Конец строки */
+      commands[cmd_idx++] = cmd_start;
+    }
+  }
+  commands[cmd_count] = NULL;
+  
   int last_status = 0;
+  pid_t bg_pid = -1;
 
-  while (current_cmd) {
-    if (current_cmd > line && *(current_cmd - 1) == '&') {
-      current_cmd = strtok_r(NULL, "&", &saveptr);
+  for (int i = 0; i < cmd_count; ++i) {
+    char* current_cmd = commands[i];
+    
+    /* Пропускаем пробелы в начале */
+    while (*current_cmd && (*current_cmd == ' ' || *current_cmd == '\t')) {
+      ++current_cmd;
+    }
+    
+    if (*current_cmd == '\0') {
       continue;
     }
 
-    last_status = execute_single_command(current_cmd);
-
-    if (last_status != 0)
-      break;
-
-    current_cmd = strtok_r(NULL, "&", &saveptr);
+    if (run_background && i == cmd_count - 1) {
+      /* Запускаем в фоне - выполняем через fork без waitpid */
+      int argc = 0;
+      char** argv = parse_command_line(current_cmd, &argc);
+      if (argv && argc > 0) {
+        char** expanded_argv = expand_env_vars(argv, argc);
+        bg_pid = fork();
+        if (bg_pid == 0) {
+          /* Дочерний процесс */
+          redirect_info_t redir = apply_redirects(expanded_argv, &argc);
+          
+          if (redir.stdin_fd >= 0) {
+            dup2(redir.stdin_fd, STDIN_FILENO);
+            close(redir.stdin_fd);
+          }
+          if (redir.stdout_fd >= 0) {
+            dup2(redir.stdout_fd, STDOUT_FILENO);
+            close(redir.stdout_fd);
+          }
+          if (redir.stderr_fd >= 0) {
+            dup2(redir.stderr_fd, STDERR_FILENO);
+            close(redir.stderr_fd);
+          } else if (redir.redirect_stderr_to_stdout) {
+            dup2(STDOUT_FILENO, STDERR_FILENO);
+          }
+          
+          execvp(expanded_argv[0], expanded_argv);
+          perror(expanded_argv[0]);
+          _exit(EXIT_FAILURE_CODE);
+        } else if (bg_pid > 0) {
+          /* Родительский процесс - выводим PID */
+          fprintf(stderr, "[%d]\n", (int)bg_pid);
+        }
+        
+        if (expanded_argv != argv) {
+          for (int j = 0; j < argc; ++j) {
+            if (expanded_argv[j] != argv[j]) {
+              free(expanded_argv[j]);
+            }
+          }
+          free(expanded_argv);
+        }
+        free(argv);
+      }
+    } else {
+      last_status = execute_single_command(current_cmd);
+      if (last_status != 0)
+        break;
+    }
   }
+  
+  free(commands);
 }
 
 /** ------------------------------------------------------------
@@ -398,6 +713,12 @@ void process_input_line(char* line) {
       free(buffer);
       return;
     }
+  }
+
+  /* Проверяем, есть ли конвейер (|) */
+  if (has_pipe(line)) {
+    execute_pipeline(line);
+    return;
   }
 
   execute_with_and(line);
