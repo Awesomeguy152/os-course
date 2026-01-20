@@ -38,6 +38,8 @@ int is_redir(const char* t);
 int execute_single_command(char* command);
 void execute_with_and(char* line);
 void process_input_line(char* line);
+void process_single_line(char* line);
+void unescape_newlines(char* str);
 
 /** ------------------------------------------------------------
  *  calculate_timespec_diff:
@@ -496,6 +498,24 @@ void execute_pipeline(char* line) {
 }
 
 /** ------------------------------------------------------------
+ *  unescape_newlines:
+ *  Заменяет литеральные \n на реальные переводы строк.
+ * ------------------------------------------------------------ */
+void unescape_newlines(char* str) {
+  char* src = str;
+  char* dst = str;
+  while (*src) {
+    if (src[0] == '\\' && src[1] == 'n') {
+      *dst++ = '\n';
+      src += 2;
+    } else {
+      *dst++ = *src++;
+    }
+  }
+  *dst = '\0';
+}
+
+/** ------------------------------------------------------------
  *  process_input_line:
  *  Обрабатывает одну строку ввода.
  * ------------------------------------------------------------ */
@@ -503,6 +523,29 @@ void process_input_line(char* line) {
   size_t len = strlen(line);
   if (len > 0 && line[len - 1] == '\n')
     line[len - 1] = '\0';
+
+  /* Заменяем \n на реальные переводы строк */
+  unescape_newlines(line);
+
+  /* Разбиваем на отдельные команды по переводам строк */
+  char* saveptr = NULL;
+  char* cmd = strtok_r(line, "\n", &saveptr);
+  while (cmd) {
+    while (*cmd == ' ' || *cmd == '\t')
+      cmd++;
+    if (*cmd != '\0') {
+      /* Обрабатываем каждую команду отдельно */
+      process_single_line(cmd);
+    }
+    cmd = strtok_r(NULL, "\n", &saveptr);
+  }
+}
+
+/** ------------------------------------------------------------
+ *  process_single_line:
+ *  Обрабатывает одну команду (без \n).
+ * ------------------------------------------------------------ */
+void process_single_line(char* line) {
   while (*line == ' ' || *line == '\t')
     line++;
   if (*line == '\0')
