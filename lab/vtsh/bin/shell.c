@@ -60,89 +60,112 @@ void calculate_timespec_diff(
 /** ------------------------------------------------------------
  *  parse_command_line:
  *  Разбивает строку line на аргументы по пробелам, табам и переводам строк.
+ *  Обрабатывает редиректы в начале токена: >file → > + file.
+ *  Токен >>file остаётся как есть (для проверки синтаксической ошибки).
+ *  Токены вида bar>bbb остаются как есть (обычный аргумент).
  *  Возвращает массив argv и количество аргументов через argc_out.
  * ------------------------------------------------------------ */
-char** parse_command_line(char* line, int* argc_out) {  // разбираем исходную строку команды в массив аргументов
-  char** argv = malloc((MAX_ARGS + 1) * sizeof(char*));  // +1 для завершающего NULL
-  if (!argv) {                       // проверяем успешность выделения памяти под массив указателей
-    perror("malloc");               // печатаем сообщение об ошибке, если malloc вернул NULL
-    return NULL;                     // прекращаем разбор при отсутствии памяти
+char** parse_command_line(char* line, int* argc_out) {
+  char** argv = malloc((MAX_ARGS + 1) * sizeof(char*));
+  if (!argv) {
+    perror("malloc");
+    return NULL;
   }
 
-  int argc = 0;   // считаем число токенов по мере разбора
-  char* p = line; // текущая позиция сканирования исходной строки
+  int argc = 0;
+  char* p = line;
   
-  while (*p && argc < MAX_ARGS) {  // продолжаем, пока не достигнем конца строки или лимита по аргументам
-    /* Пропускаем разделители, чтобы найти начало очередного токена. */
+  while (*p && argc < MAX_ARGS) {
+    /* Пропускаем пробельные символы */
     while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
-      ++p;  // двигаем указатель, пока видим разделители
-    }  // завершили пропуск разделителей между токенами
+      ++p;
+    }
+    if (*p == '\0') break;
     
-    if (*p == '\0') break;  // пустой фрагмент после разделителя — завершаем разбор
+    /* Обрабатываем 2>&1 как единый токен */
+    if (strncmp(p, "2>&1", 4) == 0) {
+      argv[argc++] = "2>&1";
+      p += 4;
+      continue;
+    }
     
-    /* Особые последовательности нужно выделять целиком, иначе мы потеряем
-     * их смысл (например, 2>&1 нельзя разделить на "2>" и "&1"). */
-    if (strncmp(p, "2>&1", 4) == 0 && (p[4] == '\0' || p[4] == ' ' || p[4] == '\t')) {  // ищем последовательность перенаправления stderr в stdout
-      argv[argc++] = "2>&1";  // объединение stderr и stdout
-      p += 4;                  // перепрыгиваем через всю последовательность
-      continue;                // возвращаемся к началу цикла для следующего токена
-    }  // завершили обработку конструкции 2>&1
-    
-    if (strncmp(p, ">>", 2) == 0 && (p[2] == '\0' || p[2] == ' ' || p[2] == '\t')) {  // проверяем оператор дозаписи
-      argv[argc++] = ">>";  // оператор дозаписи (append)
-      p += 2;                 // сдвигаем указатель за оператор
-      continue;                // обрабатываем следующий токен
-    }  // завершили обработку операторов >>
-    
-    /* Обрабатываем односимвольные операторы, стоящие отдельно от аргументов. */
-    if ((*p == '>' || *p == '<' || *p == '|' || *p == '&') && 
-        (p[1] == '\0' || p[1] == ' ' || p[1] == '\t' || p[1] == '\r' || p[1] == '\n')) {  // распознаём одиночные спецсимволы
-      if (*p == '>') {
-        argv[argc++] = ">";  // сохраняем оператор перенаправления stdout
-      } else if (*p == '<') {
-        argv[argc++] = "<";  // сохраняем оператор перенаправления stdin
-      } else if (*p == '|') {
-        argv[argc++] = "|";  // добавляем символ конвейера
-      } else if (*p == '&') {
-        argv[argc++] = "&";  // помечаем фоновое выполнение
+    /* Обрабатываем >> - если за ним пробел/конец, это оператор; иначе читаем всё до пробела как токен */
+    if (strncmp(p, ">>", 2) == 0) {
+      if (p[2] == '\0' || p[2] == ' ' || p[2] == '\t' || p[2] == '\r' || p[2] == '\n') {
+        /* >> отдельно стоящий оператор */
+        argv[argc++] = ">>";
+        p += 2;
+        continue;
       }
-      ++p;  // двигаемся на символ вперёд, поскольку оператор уже обработан
-      continue;  // переходим к следующей итерации цикла
-    }  // завершили обработку одиночных операторов перенаправления
-    
-    /* Иначе читаем "обычный" аргумент до ближайшего разделителя или спецсимвола. */
-    char* token_start = p;  // запоминаем начало обычного аргумента
-    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n' &&
-           *p != '>' && *p != '<' && *p != '|' && *p != '&') {
-      ++p;  // идём до ближайшего разделителя или спецсимвола
-    }
-    
-    size_t len = p - token_start;  // вычисляем длину аргумента
-    /* Защита от ситуаций, когда мы оказались на специальном символе и len==0:
-     * вместо создания пустого токена аккумулируем всю последовательность до ближайшего
-     * разделителя как один токен (это захватит и такие случаи, как ">foo").
-     */
-    if (len == 0 && (*p == '>' || *p == '<' || *p == '|' || *p == '&')) {
-      token_start = p;
+      /* >>filename без пробела - читаем как один токен для последующей проверки ошибки */
+      char* token_start = p;
       while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') ++p;
-      len = p - token_start;
+      size_t len = p - token_start;
+      char* token = malloc(len + 1);
+      if (token) {
+        strncpy(token, token_start, len);
+        token[len] = '\0';
+        argv[argc++] = token;
+      }
+      continue;
     }
     
-    char* token = malloc(len + 1);  // выделяем память под копию токена
-    if (token) {  // проверяем, что память под копию аргумента выделена
-      strncpy(token, token_start, len);  // копируем содержимое без завершающего нуля
-      token[len] = '\0';  // вручную добавляем нулевой терминатор
-      argv[argc++] = token;  // сохраняем копию аргумента
-    }  // завершение блока копирования обычного аргумента
-  }  // конец основного цикла разбора строки
+    /* Обрабатываем > или < в начале токена */
+    if (*p == '>' || *p == '<') {
+      char op = *p;
+      if (op == '>') {
+        argv[argc++] = ">";
+      } else {
+        argv[argc++] = "<";
+      }
+      ++p;
+      /* После оператора может сразу идти имя файла без пробела */
+      continue;
+    }
+    
+    /* Обрабатываем | и & */
+    if (*p == '|') {
+      argv[argc++] = "|";
+      ++p;
+      continue;
+    }
+    if (*p == '&') {
+      argv[argc++] = "&";
+      ++p;
+      continue;
+    }
+    
+    /* Обычный аргумент: читаем до пробела или оператора в начале следующего токена */
+    char* token_start = p;
+    while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
+      /* Если встретили оператор, проверяем, не начало ли это нового токена */
+      if (*p == '>' || *p == '<' || *p == '|' || *p == '&') {
+        /* Если мы ещё ничего не прочитали (len == 0), это оператор в начале */
+        if (p == token_start) {
+          break; /* Это будет обработано на следующей итерации */
+        }
+        /* Иначе это символ внутри аргумента (например bar>bbb), продолжаем */
+      }
+      ++p;
+    }
+    
+    size_t len = p - token_start;
+    if (len == 0) continue; /* Пустой токен — пропускаем */
+    
+    char* token = malloc(len + 1);
+    if (token) {
+      strncpy(token, token_start, len);
+      token[len] = '\0';
+      argv[argc++] = token;
+    }
+  }
 
-  argv[argc] = NULL;  // всегда завершаем массив аргументов нулём
-  if (argc_out) {  // если вызывающий код предоставил указатель под количество аргументов
-    *argc_out = argc;  // возвращаем количество разобранных токенов вызывающему коду
-  }  // завершили передачу числа аргументов наружу
-
-  return argv;  // отдаём сформированный массив строк вызывающей стороне
-}  // завершение parse_command_line
+  argv[argc] = NULL;
+  if (argc_out) {
+    *argc_out = argc;
+  }
+  return argv;
+}
 
 /* ========== Структуры и функции для редиректов и переменных ========== */
 
@@ -503,6 +526,9 @@ void process_input_line(char* line) {  // разбираем и выполняе
  *  Главный цикл shell — выделен отдельно от main
  * ------------------------------------------------------------ */
 void run_shell(void) {  // основной цикл чтения и выполнения команд
+  /* Отключаем буферизацию stdin чтобы дочерние процессы могли читать оставшиеся данные */
+  setvbuf(stdin, NULL, _IONBF, 0);
+  
   char* input_line = NULL;  // указатель на буфер, который getline будет расширять при необходимости
   size_t buffer_size = 0;  // текущий размер выделенного буфера (управляется getline)
 
@@ -687,7 +713,11 @@ int execute_command(char** argv) {
     if (redir.stderr_fd >= 0) { dup2(redir.stderr_fd, STDERR_FILENO); close(redir.stderr_fd); }
     else if (redir.redirect_stderr_to_stdout) { dup2(STDOUT_FILENO, STDERR_FILENO); }
     execvp(argv[0], argv);
-    perror(argv[0]);
+    /* execvp failed - check if command not found */
+    if (errno == ENOENT) {
+      printf("Command not found\n");
+      fflush(stdout);
+    }
     _exit(CHILD_ERROR_CODE);
   }
   int status = 0;
@@ -701,107 +731,111 @@ int execute_command(char** argv) {
   return EXIT_FAILURE_CODE;
 }
 
-int execute_single_command(char* command) {  // выполняем отдельную команду без учёта операторов &&
-  while (*command == ' ' || *command == '\t' || *command == '\n')  // пропускаем ведущие пробельные символы
-    command++;  // перемещаем указатель к первому значимому символу
-  if (*command == '\0')  // проверяем, не осталась ли строка пустой после обрезки пробелов
-    return 0;  // пустую команду считаем успешно обработанной без выполнения
+int execute_single_command(char* command) {
+  while (*command == ' ' || *command == '\t' || *command == '\n')
+    command++;
+  if (*command == '\0')
+    return 0;
 
-  int argc = 0;  // переменная для количества разобранных аргументов
-  char** argv = parse_command_line(command, &argc);  // превращаем строку в массив аргументов
-  if (!argv || argc == 0) {  // проверяем, удалось ли распарсить хотя бы один токен
-    free(argv);  // на случай, если parse_command_line вернул непустой указатель без аргументов
-    return 0;  // возвращаем успех, так как исполнять нечего
+  int argc = 0;
+  char** argv = parse_command_line(command, &argc);
+  if (!argv || argc == 0) {
+    free(argv);
+    return 0;
   }
 
-  // Строгая проверка синтаксиса редиректов для тестов
-  // 1. Оператор редиректа не может идти в начале или конце
-  // 2. Два оператора подряд — ошибка
-  // 3. Оператор без аргумента — ошибка
-  // 4. Оператор >> без аргумента — ошибка
-  // 5. Оператор < >hello — ошибка
-  // 6. Оператор >>hello — ошибка
-  for (int i = 0; i < argc; ++i) {
-    // Оператор в начале или конце
-    if ((i == 0 || i == argc-1) && is_redir(argv[i])) {
-      puts("Syntax error");
-      for (int j = 0; j < argc; ++j) {
-        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 && strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 && strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
-          free(argv[j]);
-        }
-      }
-      free(argv);
-      return 0;
-    }
-    // Два оператора подряд
-    if (i+1 < argc && is_redir(argv[i]) && is_redir(argv[i+1])) {
-      puts("Syntax error");
-      for (int j = 0; j < argc; ++j) {
-        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 && strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 && strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
-          free(argv[j]);
-        }
-      }
-      free(argv);
-      return 0;
-    }
-    // Оператор без аргумента
-    if (is_redir(argv[i]) && (i+1 == argc)) {
-      puts("Syntax error");
-      for (int j = 0; j < argc; ++j) {
-        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 && strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 && strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
-          free(argv[j]);
-        }
-      }
-      free(argv);
-      return 0;
-    }
-    // Оператор >>hello или <one
-    if ((strncmp(argv[i], ">>", 2) == 0 && strlen(argv[i]) > 2) ||
-        (strncmp(argv[i], ">", 1) == 0 && strlen(argv[i]) > 1) ||
-        (strncmp(argv[i], "<", 1) == 0 && strlen(argv[i]) > 1)) {
-      puts("Syntax error");
-      for (int j = 0; j < argc; ++j) {
-        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 && strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 && strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
-          free(argv[j]);
-        }
-      }
-      free(argv);
-      return 0;
-    }
-  }
-
-  // Простая валидация синтаксиса редиректов/операторов.
-  for (int i = 0; i < argc; ++i) {
-    char* t = argv[i];
-    if (t == NULL) continue;
-    if (strcmp(t, ">") == 0 || strcmp(t, ">>") == 0 || strcmp(t, "<") == 0 ||
-        strcmp(t, "|") == 0 || strcmp(t, "&") == 0 || strcmp(t, "2>&1") == 0) {
-      continue;
-    }
-    for (char* p = t; *p; ++p) {
-      if (*p == '>' || *p == '<' || *p == '|' || *p == '&') {
-        puts("Syntax error");
-        for (int j = 0; j < argc; ++j) free(argv[j]);
-        free(argv);
-        return 0;
-      }
-    }
-  }
-
-  char** expanded_argv = expand_env_vars(argv, argc);  // раскрываем переменные окружения внутри аргументов
-  int status = execute_command(expanded_argv);  // передаём подготовленный набор аргументов общему исполнителю
+  /* Валидация синтаксиса редиректов:
+   * 1. Редирект в конце без файла (например "wc -l <")
+   * 2. Два редиректа подряд (например "< >hello")
+   * 3. Два редиректа одного типа (например ">foo > bar" или "<one ... <bar")
+   * 4. Токен >>filename (слитно) — синтаксическая ошибка
+   */
   
-  if (expanded_argv != argv) {  // если expand_env_vars создал отдельный массив
-    for (int i = 0; i < argc; ++i) {  // проходим по каждому аргументу
-      if (expanded_argv[i] != argv[i]) {  // освобождаем только те строки, что были пересозданы
-        free(expanded_argv[i]);  // удаляем временную строку, чтобы избежать утечки памяти
+  int stdout_redir_count = 0;  /* Счётчик > и >> */
+  int stdin_redir_count = 0;   /* Счётчик < */
+  
+  for (int i = 0; i < argc; ++i) {
+    const char* t = argv[i];
+    
+    /* Токен >>filename (слитно без пробела) — синтаксическая ошибка */
+    if (strncmp(t, ">>", 2) == 0 && strlen(t) > 2) {
+      puts("Syntax error");
+      for (int j = 0; j < argc; ++j) {
+        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 &&
+            strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 &&
+            strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
+          free(argv[j]);
+        }
       }
+      free(argv);
+      return 0;
     }
-    free(expanded_argv);  // освобождаем массив указателей на расширенные строки
+    
+    /* Редирект в конце без файла */
+    if (is_redir(t) && i + 1 >= argc) {
+      puts("Syntax error");
+      for (int j = 0; j < argc; ++j) {
+        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 &&
+            strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 &&
+            strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
+          free(argv[j]);
+        }
+      }
+      free(argv);
+      return 0;
+    }
+    
+    /* Два редиректа подряд */
+    if (is_redir(t) && i + 1 < argc && is_redir(argv[i + 1])) {
+      puts("Syntax error");
+      for (int j = 0; j < argc; ++j) {
+        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 &&
+            strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 &&
+            strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
+          free(argv[j]);
+        }
+      }
+      free(argv);
+      return 0;
+    }
+    
+    /* Подсчитываем редиректы */
+    if (strcmp(t, ">") == 0 || strcmp(t, ">>") == 0) {
+      stdout_redir_count++;
+    }
+    if (strcmp(t, "<") == 0) {
+      stdin_redir_count++;
+    }
   }
   
-  free(argv);  // освобождаем исходный argv, выделенный parse_command_line
-  return status;  // возвращаем статус выполнения команды вызывающему коду
+  /* Два редиректа stdout (">foo > bar") или два stdin ("<one ... <bar") */
+  if (stdout_redir_count > 1 || stdin_redir_count > 1) {
+    puts("Syntax error");
+    for (int j = 0; j < argc; ++j) {
+      if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 &&
+          strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 &&
+          strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
+        free(argv[j]);
+      }
+    }
+    free(argv);
+    return 0;
+  }
+
+  char** expanded_argv = expand_env_vars(argv, argc);
+  int status = execute_command(expanded_argv);
+  
+  if (expanded_argv != argv) {
+    for (int i = 0; i < argc; ++i) {
+      if (expanded_argv[i] != argv[i]) {
+        free(expanded_argv[i]);
+      }
+    }
+    free(expanded_argv);
+  }
+  
+  free(argv);
+  return status;
 }
 
 // Вспомогательная функция для проверки, является ли токен оператором редиректа
