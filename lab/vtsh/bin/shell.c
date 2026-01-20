@@ -1,18 +1,19 @@
 #include <string.h>
-#define _XOPEN_SOURCE 700  // активируем расширенные POSIX-возможности (strptime, pipe2 и т.д.)
-#define _BSD_SOURCE        // включаем дополнительные BSD-расширения, которые использует оболочка
-#include "shell.h"        // внутренний заголовок с прототипами и константами, общими для проекта
+#define _XOPEN_SOURCE 700
+#define _BSD_SOURCE
 
-#include <ctype.h>    // функции классификации символов (isalnum и др.) — нужны при разборе переменных окружения
-#include <errno.h>    // глобальная переменная errno и текст ошибок для сообщений пользователю
-#include <fcntl.h>    // константы и прототипы open/dup для работы с перенаправлениями файловых дескрипторов
-#include <limits.h>   // стандартные пределы (например, PATH_MAX) на случай проверки входных данных
-#include <stdio.h>    // стандартные функции ввода-вывода (printf, fprintf, perror)
-#include <stdlib.h>   // выделение памяти (malloc/free) и преобразование строк в числа
-#include <string.h>   // операции со строками (strncpy, strtok_r, strchr)
-#include <sys/wait.h> // ожидание завершения дочерних процессов (waitpid)
-#include <time.h>     // структуры и функции для измерения времени выполнения команд
-#include <unistd.h>   // базовые POSIX-вызовы (fork, execvp, pipe, dup2, close)
+#include <ctype.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/wait.h>
+#include <time.h>
+#include <unistd.h>
+
+#include "shell.h"
 
 /** ------------------------------------------------------------
  *  Константы для читаемости и предотвращения magic numbers
@@ -24,11 +25,13 @@
  *    при невозможности запустить execvp.
  *  - PROMPT_STRING: строка приглашения, определённая в заголовке.
  */
-#define NSEC_PER_SEC 1000000000L  // количество наносекунд в одной секунде (служит для нормализации timespec)
-#define EXIT_SUCCESS_CODE 0       // универсальный код успешного завершения оболочки
-#define EXIT_FAILURE_CODE 1       // постоянный код ошибки для внутренних сбоев
-#define CHILD_ERROR_CODE 127      // значение, с которым дочерний процесс завершает работу при ошибке execvp
-#define PROMPT_STRING PROMPT      // шаблон приглашения (см. shell.h), используемый при интерактивном вводе
+#define NSEC_PER_SEC 1000000000L
+
+#define EXIT_SUCCESS_CODE 0
+#define EXIT_FAILURE_CODE 1
+#define CHILD_ERROR_CODE 127
+
+#define PROMPT_STRING PROMPT
 
 /* Прототипы функций, используемых в разных частях файла */
 int is_redir(const char* t);
@@ -46,16 +49,15 @@ void calculate_timespec_diff(
     const struct timespec* end,
     struct timespec* result
 ) {
-  // отдельно вычитаем целые секунды и остаток в наносекундах
-  result->tv_sec = end->tv_sec - start->tv_sec;      // считаем разницу по секундам
-  result->tv_nsec = end->tv_nsec - start->tv_nsec;   // считаем разницу по наносекундам
+  result->tv_sec = end->tv_sec - start->tv_sec;
+  result->tv_nsec = end->tv_nsec - start->tv_nsec;
 
   /** Корректируем разницу, если наносекунды стали отрицательными */
-  if (result->tv_nsec < 0) {                   // проверяем, ушла ли дробная часть в отрицательную область
-    result->tv_sec -= 1;              // "занимаем" одну секунду у секундной части
-    result->tv_nsec += NSEC_PER_SEC;  // и компенсируем её в наносекундах
+  if (result->tv_nsec < 0) {
+    result->tv_sec -= 1;
+    result->tv_nsec += NSEC_PER_SEC;
   }
-}  // завершение calculate_timespec_diff
+}
 
 /** ------------------------------------------------------------
  *  parse_command_line:
@@ -74,32 +76,37 @@ char** parse_command_line(char* line, int* argc_out) {
 
   int argc = 0;
   char* p = line;
-  
+
   while (*p && argc < MAX_ARGS) {
     /* Пропускаем пробельные символы */
     while (*p && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) {
       ++p;
     }
-    if (*p == '\0') break;
-    
+    if (*p == '\0')
+      break;
+
     /* Обрабатываем 2>&1 как единый токен */
     if (strncmp(p, "2>&1", 4) == 0) {
       argv[argc++] = "2>&1";
       p += 4;
       continue;
     }
-    
-    /* Обрабатываем >> - если за ним пробел/конец, это оператор; иначе читаем всё до пробела как токен */
+
+    /* Обрабатываем >> - если за ним пробел/конец, это оператор; иначе читаем
+     * всё до пробела как токен */
     if (strncmp(p, ">>", 2) == 0) {
-      if (p[2] == '\0' || p[2] == ' ' || p[2] == '\t' || p[2] == '\r' || p[2] == '\n') {
+      if (p[2] == '\0' || p[2] == ' ' || p[2] == '\t' || p[2] == '\r' ||
+          p[2] == '\n') {
         /* >> отдельно стоящий оператор */
         argv[argc++] = ">>";
         p += 2;
         continue;
       }
-      /* >>filename без пробела - читаем как один токен для последующей проверки ошибки */
+      /* >>filename без пробела - читаем как один токен для последующей проверки
+       * ошибки */
       char* token_start = p;
-      while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') ++p;
+      while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n')
+        ++p;
       size_t len = p - token_start;
       char* token = malloc(len + 1);
       if (token) {
@@ -109,7 +116,7 @@ char** parse_command_line(char* line, int* argc_out) {
       }
       continue;
     }
-    
+
     /* Обрабатываем > или < в начале токена */
     if (*p == '>' || *p == '<') {
       char op = *p;
@@ -122,7 +129,7 @@ char** parse_command_line(char* line, int* argc_out) {
       /* После оператора может сразу идти имя файла без пробела */
       continue;
     }
-    
+
     /* Обрабатываем | и & */
     if (*p == '|') {
       argv[argc++] = "|";
@@ -134,8 +141,9 @@ char** parse_command_line(char* line, int* argc_out) {
       ++p;
       continue;
     }
-    
-    /* Обычный аргумент: читаем до пробела или оператора в начале следующего токена */
+
+    /* Обычный аргумент: читаем до пробела или оператора в начале следующего
+     * токена */
     char* token_start = p;
     while (*p && *p != ' ' && *p != '\t' && *p != '\r' && *p != '\n') {
       /* Если встретили оператор, проверяем, не начало ли это нового токена */
@@ -148,10 +156,11 @@ char** parse_command_line(char* line, int* argc_out) {
       }
       ++p;
     }
-    
+
     size_t len = p - token_start;
-    if (len == 0) continue; /* Пустой токен — пропускаем */
-    
+    if (len == 0)
+      continue; /* Пустой токен — пропускаем */
+
     char* token = malloc(len + 1);
     if (token) {
       strncpy(token, token_start, len);
@@ -176,542 +185,574 @@ char** parse_command_line(char* line, int* argc_out) {
  *  в одну структуру, чтобы затем компактно применить их перед execvp.
  */
 typedef struct {
-  int stdin_fd;   // >=0, если stdin нужно заменить дескриптором открытого файла
-  int stdout_fd;  // >=0, если стандартный вывод перенаправляется в файл
-  int stderr_fd;  // >=0, если поток ошибок перенаправляется отдельно
-  int redirect_stderr_to_stdout;  // флаг для конструкции 2>&1 (stderr -> stdout)
+  int stdin_fd;
+  int stdout_fd;
+  int stderr_fd;
+  int redirect_stderr_to_stdout;
+
 } redirect_info_t;
 
 /** ------------------------------------------------------------
  *  apply_redirects — вырезает операторы перенаправления из argv и
  *  подготавливает файловые дескрипторы для dup2
  * ------------------------------------------------------------ */
-redirect_info_t apply_redirects(char** argv, int* argc_ptr) {  // вырезаем операторы перенаправления из argv и открываем нужные файлы
-  redirect_info_t redir = {-1, -1, -1, 0};  // значения "по умолчанию": перенаправлений нет
-  int new_argc = 0;  // позиция для записи "очищенных" аргументов
-  
-  for (int i = 0; argv[i] != NULL; ++i) {  // пробегаем по каждому аргументу исходного списка
-    if (strcmp(argv[i], ">") == 0) {  // проверяем оператор перезаписи stdout в файл
-      if (argv[i + 1] == NULL) {  // убеждаемся, что указано имя файла после '>'
+redirect_info_t apply_redirects(char** argv, int* argc_ptr) {
+  redirect_info_t redir = {-1, -1, -1, 0};
+  int new_argc = 0;
+
+  for (int i = 0; argv[i] != NULL; ++i) {
+    if (strcmp(argv[i], ">") == 0) {
+      if (argv[i + 1] == NULL) {
         /* Синтаксическая ошибка: отсутствует имя файла */
-        /* Оставляем распечатанную ошибку на уровне вызывающего кода: execute_single_command
-         * проверяет синтаксис заранее, но на всякий случай возвращаем структуру */
+        /* Оставляем распечатанную ошибку на уровне вызывающего кода:
+         * execute_single_command проверяет синтаксис заранее, но на всякий
+         * случай возвращаем структуру */
         return redir;
       }
-      int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);  // создаём/очищаем файл
-      if (fd < 0) {  // проверяем, что файл удалось открыть
+      int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
+      if (fd < 0) {
         /* Ошибка ввода-вывода — пометим это специальным значением и вернём */
-        redir.stdout_fd = -2;  // sentinel для I/O ошибки
-        return redir;
-      }
-      redir.stdout_fd = fd;  // сохраняем дескриптор для последующего dup2
-      ++i;  // пропускаем имя файла в исходном списке argv
-      continue;  // переходим к следующему аргументу
-    }  // завершили обработку оператора '>'
-    
-    if (strcmp(argv[i], ">>") == 0) {  // проверяем оператор дозаписи
-      if (argv[i + 1] == NULL) {  // проверяем, что после >> есть имя файла
-        return redir;
-      }
-      int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_APPEND, 0644);  // дозапись в конец файла
-      if (fd < 0) {  // проверяем успешность открытия
         redir.stdout_fd = -2;
         return redir;
       }
-      redir.stdout_fd = fd;  // запоминаем дескриптор для перенаправления stdout
-      ++i;  // пропускаем имя файла в аргументах
-      continue;  // переходим к следующему токену
-    }  // завершили обработку оператора '>>'
-    
-    if (strcmp(argv[i], "<") == 0) {  // проверяем оператор замены stdin
-      if (argv[i + 1] == NULL) {  // убеждаемся, что после '<' указан файл
+      redir.stdout_fd = fd;
+      ++i;
+      continue;
+    }
+
+    if (strcmp(argv[i], ">>") == 0) {
+      if (argv[i + 1] == NULL) {
         return redir;
       }
-      int fd = open(argv[i + 1], O_RDONLY);  // входной поток читаем из указанного файла
-      if (fd < 0) {  // контролируем, что файл удалось открыть
+      int fd = open(argv[i + 1], O_WRONLY | O_CREAT | O_APPEND, 0644);
+      if (fd < 0) {
+        redir.stdout_fd = -2;
+        return redir;
+      }
+      redir.stdout_fd = fd;
+      ++i;
+      continue;
+    }
+
+    if (strcmp(argv[i], "<") == 0) {
+      if (argv[i + 1] == NULL) {
+        return redir;
+      }
+      int fd = open(argv[i + 1], O_RDONLY);
+      if (fd < 0) {
         redir.stdin_fd = -2;
         return redir;
       }
-      redir.stdin_fd = fd;  // сохраняем дескриптор для подстановки stdin
-      ++i;  // пропускаем имя файла в массиве аргументов
-      continue;  // продолжаем цикл, когда редирект обработан
-    }  // завершили обработку оператора '<'
-    
-    if (strcmp(argv[i], "2>&1") == 0) {  // распознаём объединение stderr и stdout
-      redir.redirect_stderr_to_stdout = 1;  // stderr будет дублироваться в stdout
-      continue;  /* Пропускаем этот аргумент (не добавляем в argv) */
-    }  // завершили обработку конструкции 2>&1
-    
-    argv[new_argc++] = argv[i];  // обычный аргумент: оставляем его в очереди для execvp
-  }  // завершили проход по всем аргументам
-  
-  argv[new_argc] = NULL;  // корректно завершаем укороченный argv
-  if (argc_ptr) {  // если вызывающий код ожидал получить обновлённое число аргументов
-    *argc_ptr = new_argc;  // возвращаем длину очищенного массива аргументов
+      redir.stdin_fd = fd;
+      ++i;
+      continue;
+    }
+
+    if (strcmp(argv[i], "2>&1") == 0) {
+      redir.redirect_stderr_to_stdout = 1;
+      continue; /* Пропускаем этот аргумент (не добавляем в argv) */
+    }
+
+    argv[new_argc++] = argv[i];
   }
-  return redir;  // отдаём собранную информацию о перенаправлениях
-}  // завершение apply_redirects
+
+  argv[new_argc] = NULL;
+  if (argc_ptr) {
+    *argc_ptr = new_argc;
+  }
+  return redir;
+}
 
 /** ------------------------------------------------------------
  *  expand_env_vars — подставляет значения из окружения в аргументы
  * ------------------------------------------------------------ */
-char** expand_env_vars(char** argv, int argc) {  // подставляем значения переменных окружения в аргументы
-  char** expanded_argv = malloc((argc + 1) * sizeof(char*));  // выделяем массив под потенциально новые строки
-  if (!expanded_argv) {  // проверяем успешность выделения памяти
-    perror("malloc");  // сообщаем об ошибке выделения
-    return argv;  // если памяти нет, возвращаем исходный массив без модификаций
-  }  // завершили проверку выделения массива расширенных аргументов
-  
-  for (int i = 0; i < argc; ++i) {  // обрабатываем каждый аргумент по очереди
-    const char* arg = argv[i];  // текущая строка аргумента
-    const char* dollar_pos = strchr(arg, '$');  // ищем начало выражения вида $VAR
-    
-  if (!dollar_pos) {  // если доллара нет, переменных окружения в токене нет
-      expanded_argv[i] = argv[i];  // аргумент не содержит переменных — переиспользуем его
-      continue;  // переходим к следующему аргументу
-    }  // завершили обработку аргумента без '$'
-    
-    size_t var_name_len = 0;  // длина имени переменной окружения
-    const char* var_start = dollar_pos + 1;  // позиция первого символа имени после '$'
-    while (var_start[var_name_len] && 
-           (isalnum((unsigned char)var_start[var_name_len]) || var_start[var_name_len] == '_')) {
-      ++var_name_len;  // допустимыми символами считаем [A-Za-z0-9_]
+char** expand_env_vars(char** argv, int argc) {
+  char** expanded_argv = malloc((argc + 1) * sizeof(char*));
+  if (!expanded_argv) {
+    perror("malloc");
+    return argv;
+  }
+
+  for (int i = 0; i < argc; ++i) {
+    const char* arg = argv[i];
+    const char* dollar_pos = strchr(arg, '$');
+
+    if (!dollar_pos) {
+      expanded_argv[i] = argv[i];
+      continue;
     }
-    
-  if (var_name_len == 0) {  // если сразу после '$' нет корректного имени
-      expanded_argv[i] = argv[i];  // после '$' не было имени — оставляем строку как есть
-      continue;  // переходим к следующему токену
-    }  // завершили обработку некорректного имени переменной
-    
-    char var_name[256];  // временный буфер для имени переменной окружения
-  if (var_name_len >= sizeof(var_name)) {  // защита от переполнения локального буфера
-      var_name_len = sizeof(var_name) - 1;  // усечём слишком длинные имена
-    }  // завершили защиту от чрезмерно длинного имени переменной
-    strncpy(var_name, var_start, var_name_len);  // копируем имя переменной в локальный буфер
-    var_name[var_name_len] = '\0';  // завершаем имя нулём
-    
-    const char* var_value = getenv(var_name);  // читаем значение из окружения
-  if (!var_value) {  // если переменной нет
-      var_value = "";  // если переменной нет — подставляем пустую строку
-    }  // заменили отсутствующее значение переменной на пустую строку
-    
-    size_t prefix_len = dollar_pos - arg;  // часть до '$'
-    const char* suffix = var_start + var_name_len;  // остаток после имени переменной
-    size_t suffix_len = strlen(suffix);  // длина хвоста после переменной
-    size_t total_len = prefix_len + strlen(var_value) + suffix_len + 1;  // полный размер новой строки, включая терминатор
-    
-    char* expanded = malloc(total_len);  // выделяем буфер под собранную строку
-    if (!expanded) {  // проверяем успешность выделения
-      perror("malloc");  // сигнализируем об ошибке памяти
-      expanded_argv[i] = argv[i];  // откатываемся к исходному аргументу
-      continue;  // переходим к следующему токену без подстановки
-    }  // завершили проверку выделения буфера под подставленную строку
-    
-    strncpy(expanded, arg, prefix_len);  // копируем префикс
-    strcpy(expanded + prefix_len, var_value);  // вставляем значение переменной
-    strcpy(expanded + prefix_len + strlen(var_value), suffix);  // и дописываем суффикс
-    
-    expanded_argv[i] = expanded;  // сохраняем новую строку в результирующем массиве
-  }  // завершение цикла подстановки переменных окружения
-  
-  expanded_argv[argc] = NULL;  // массив аргументов должен завершаться нулём
-  return expanded_argv;  // возвращаем расширенный список аргументов
-}  // завершение expand_env_vars
+
+    size_t var_name_len = 0;
+    const char* var_start = dollar_pos + 1;
+    while (var_start[var_name_len] &&
+           (isalnum((unsigned char)var_start[var_name_len]) ||
+            var_start[var_name_len] == '_')) {
+      ++var_name_len;
+    }
+
+    if (var_name_len == 0) {
+      expanded_argv[i] = argv[i];
+      continue;
+    }
+
+    char var_name[256];
+    if (var_name_len >= sizeof(var_name)) {
+      var_name_len = sizeof(var_name) - 1;
+    }
+    strncpy(var_name, var_start, var_name_len);
+    var_name[var_name_len] = '\0';
+
+    const char* var_value = getenv(var_name);
+    if (!var_value) {
+      var_value = "";
+    }
+
+    size_t prefix_len = dollar_pos - arg;
+    const char* suffix = var_start + var_name_len;
+    size_t suffix_len = strlen(suffix);
+    size_t total_len = prefix_len + strlen(var_value) + suffix_len + 1;
+
+    char* expanded = malloc(total_len);
+    if (!expanded) {
+      perror("malloc");
+      expanded_argv[i] = argv[i];
+      continue;
+    }
+
+    strncpy(expanded, arg, prefix_len);
+    strcpy(expanded + prefix_len, var_value);
+    strcpy(expanded + prefix_len + strlen(var_value), suffix);
+
+    expanded_argv[i] = expanded;
+  }
+
+  expanded_argv[argc] = NULL;
+  return expanded_argv;
+}
 
 /* ========== Функция для обработки конвейера (pipe) ========== */
 
-int has_pipe(char* line) {  // проверяем, содержит ли строка символ конвейера
-  return strchr(line, '|') != NULL;  // достаточно найти хотя бы один символ '|'
-}  // завершение has_pipe
+int has_pipe(char* line) {
+  return strchr(line, '|') != NULL;
+}
 
-int has_background(char* line) {  // проверяем, есть ли маркер фонового запуска
-  const char* ptr = line;  // проходим по всей строке и ищем маркер '&'
-  while (*ptr) {  // итерируемся до конца строки
-    if (*ptr == '&') {  // нашли символ '&'
-      return 1;  // '&' встречается — команда предназначена для фонового запуска
+int has_background(char* line) {
+  const char* ptr = line;
+  while (*ptr) {
+    if (*ptr == '&') {
+      return 1;
     }
-    ++ptr;  // переходим к следующему символу строки
+    ++ptr;
   }
-  return 0;  // маркер не найден
-}  // завершение has_background
+  return 0;
+}
 
-void execute_pipeline(char* line) {  // выполняем командную строку, содержащую конвейер
+void execute_pipeline(char* line) {
   /* Копируем строку, так как стrtok модифицирует её */
-  char* line_copy = malloc(strlen(line) + 1);  // выделяем буфер под копию исходной строки
-  if (!line_copy) {  // проверяем успешность выделения памяти
-    perror("malloc");  // сообщаем об ошибке
-    return;  // прекращаем обработку конвейера без памяти
-  }  // завершили проверку выделения копии исходной строки
-  strcpy(line_copy, line);  // копируем исходную команду, чтобы strtok_r мог её модифицировать
-  
-  /* Подсчитываем количество команд (разделены |), чтобы заранее выделить массив указателей */
-  int cmd_count = 1;  // начинаем с одной команды
-  for (int i = 0; line_copy[i]; ++i) {  // проходим по копии строки
-    if (line_copy[i] == '|') {  // встречаем разделитель конвейера
-      ++cmd_count;  // увеличиваем количество команд
+  char* line_copy = malloc(strlen(line) + 1);
+  if (!line_copy) {
+    perror("malloc");
+    return;
+  }
+  strcpy(line_copy, line);
+
+  /* Подсчитываем количество команд (разделены |), чтобы заранее выделить массив
+   * указателей */
+  int cmd_count = 1;
+  for (int i = 0; line_copy[i]; ++i) {
+    if (line_copy[i] == '|') {
+      ++cmd_count;
     }
   }
-  
+
   /* Выделяем память для команд */
-  char** commands = malloc(cmd_count * sizeof(char*));  // массив указателей на отдельные команды
-  if (!commands) {  // проверяем, удалось ли выделить память
-    perror("malloc");  // информируем об ошибке
-    free(line_copy);  // освобождаем копию строки
-    return;  // прекращаем обработку из-за нехватки памяти
-  }  // завершили проверку выделения массива команд
-  
+  char** commands = malloc(cmd_count * sizeof(char*));
+  if (!commands) {
+    perror("malloc");
+    free(line_copy);
+    return;
+  }
+
   /* Разбиваем на команды, сохраняя указатели на начало каждого фрагмента */
-  char* saveptr = NULL;  // вспомогательный указатель для strtok_r
-  char* cmd = strtok_r(line_copy, "|", &saveptr);  // получаем первую команду
-  int idx = 0;  // индекс текущей команды
-  while (cmd && idx < cmd_count) {  // продолжаем, пока есть команды и не вышли за лимит
+  char* saveptr = NULL;
+  char* cmd = strtok_r(line_copy, "|", &saveptr);
+  int idx = 0;
+  while (cmd && idx < cmd_count) {
     /* Пропускаем пробелы в начале */
     while (*cmd && (*cmd == ' ' || *cmd == '\t')) {
-      ++cmd;  // отбрасываем лидирующие пробелы в подкоманде
-    }  // завершили очистку ведущих пробелов одной команды конвейера
-    commands[idx++] = cmd;  // сохраняем очищенный указатель на команду
-    cmd = strtok_r(NULL, "|", &saveptr);  // переходим к следующей части конвейера
-  }  // завершили разбиение исходной строки на отдельные команды
-  
+      ++cmd;
+    }
+    commands[idx++] = cmd;
+    cmd = strtok_r(NULL, "|", &saveptr);
+  }
+
   /* Массив для хранения PID дочерних процессов */
-  pid_t* pids = malloc(cmd_count * sizeof(pid_t));  // резервируем место под идентификаторы процессов
-  if (!pids) {  // проверяем успешность выделения памяти под PIDы
-    perror("malloc");  // сообщаем об ошибке
-    free(commands);  // освобождаем массив команд
-    free(line_copy);  // освобождаем копию исходной строки
-    return;  // завершаем обработку конвейера
-  }  // завершили проверку выделения массива PIDов
-  
-  int prev_pipe_read = -1;  // дескриптор чтения предыдущей трубы (для подключения stdin)
-  
-  for (int i = 0; i < cmd_count; ++i) {  // обрабатываем каждую команду в конвейере по порядку
-    int pipe_fds[2];  // дескрипторы для новой трубы между текущей и следующей командой
-    
+  pid_t* pids = malloc(cmd_count * sizeof(pid_t));
+  if (!pids) {
+    perror("malloc");
+    free(commands);
+    free(line_copy);
+    return;
+  }
+
+  int prev_pipe_read = -1;
+
+  for (int i = 0; i < cmd_count; ++i) {
+    int pipe_fds[2];
+
     /* Создаём трубу для всех команд кроме последней */
-    if (i < cmd_count - 1) {  // если текущая команда не последняя
-      if (pipe(pipe_fds) < 0) {  // пытаемся создать новую трубу
-        perror("pipe");  // сообщаем об ошибке системного вызова
-        free(pids);  // освобождаем массив PIDов
-        free(commands);  // освобождаем массив команд
-        free(line_copy);  // освобождаем копию исходной строки
-        return;  // прекращаем выполнение конвейера
+    if (i < cmd_count - 1) {
+      if (pipe(pipe_fds) < 0) {
+        perror("pipe");
+        free(pids);
+        free(commands);
+        free(line_copy);
+        return;
       }
-    }  // завершили подготовку трубы для текущей команды
-    
+    }
+
     /* Парсим текущую команду */
-    int argc = 0;  // количество аргументов текущей команды
-    char** argv = parse_command_line(commands[i], &argc);  // разбираем строку в массив аргументов
-    if (!argv || argc == 0) {  // проверяем, есть ли что исполнять
-      free(argv);  // освобождаем потенциально выделенный массив
+    int argc = 0;
+    char** argv = parse_command_line(commands[i], &argc);
+    if (!argv || argc == 0) {
+      free(argv);
       if (i < cmd_count - 1) {
-        close(pipe_fds[0]);  // закрываем конец чтения трубы, если он существовал
-        close(pipe_fds[1]);  // закрываем конец записи трубы
-      }  // завершили закрытие трубы для пропущенной команды
-      continue;  // переходим к следующей команде без запуска процесса
-    }
-    
-    /* Расширяем переменные окружения */
-    char** expanded_argv = expand_env_vars(argv, argc);  // подставляем переменные окружения в аргументы
-    
-    pid_t pid = fork();  // создаём новый процесс для запуска команды
-    if (pid < 0) {  // проверяем, успешно ли прошёл fork
-      perror("fork");  // печатаем сообщение об ошибке
-      free(expanded_argv);  // освобождаем расширенный массив аргументов
-      if (expanded_argv != argv) free(argv);  // если expand_env_vars выделил новые строки, освобождаем исходный массив
-      if (i < cmd_count - 1) {
-        close(pipe_fds[0]);  // закрываем дескрипторы трубы
+        close(pipe_fds[0]);
         close(pipe_fds[1]);
-      }  // завершили закрытие временной трубы после сбоя fork
-      continue;  // переходим к следующей команде
-    }  // завершили обработку ошибки fork в конвейере
-    
-    if (pid == 0) {  // код дочернего процесса
-      /* Дочерний процесс */
-      
-      /* Перенаправляем stdin из предыдущей трубы (если не первая команда) */
-      if (prev_pipe_read != -1) {  // если существует ввод из предыдущей команды
-        dup2(prev_pipe_read, STDIN_FILENO);  // подключаем чтение из предыдущей трубы к stdin
-        close(prev_pipe_read);  // закрываем оригинальный дескриптор после дублирования
-      }  // завершили перенаправление stdin из предыдущей ступени
-      
-      /* Перенаправляем stdout в трубу (если не последняя команда) */
-      if (i < cmd_count - 1) {  // если имеются команды после текущей
-        dup2(pipe_fds[1], STDOUT_FILENO);  // направляем stdout в пишущий конец новой трубы
-        close(pipe_fds[0]);  // закрываем читающий конец (не используется в ребёнке)
-        close(pipe_fds[1]);  // закрываем оригинальный пишущий конец после dup2
-      }  // завершили перенаправление stdout в следующую трубу
-      
-      execvp(expanded_argv[0], expanded_argv);  // запускаем команду, заменяя процесс
-      perror(expanded_argv[0]);  // если execvp вернулся, значит произошла ошибка — печатаем её
-      _exit(EXIT_FAILURE_CODE);  // выходим из дочернего процесса с кодом ошибки
+      }
+      continue;
     }
-    
+
+    /* Расширяем переменные окружения */
+    char** expanded_argv = expand_env_vars(argv, argc);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+      perror("fork");
+      free(expanded_argv);
+      if (expanded_argv != argv)
+        free(argv);
+
+      if (i < cmd_count - 1) {
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+      }
+      continue;
+    }
+
+    if (pid == 0) {
+      /* Дочерний процесс */
+
+      /* Перенаправляем stdin из предыдущей трубы (если не первая команда) */
+      if (prev_pipe_read != -1) {
+        dup2(prev_pipe_read, STDIN_FILENO);
+        close(prev_pipe_read);
+      }
+
+      /* Перенаправляем stdout в трубу (если не последняя команда) */
+      if (i < cmd_count - 1) {
+        dup2(pipe_fds[1], STDOUT_FILENO);
+        close(pipe_fds[0]);
+        close(pipe_fds[1]);
+      }
+
+      execvp(expanded_argv[0], expanded_argv);
+      perror(expanded_argv[0]);
+      _exit(EXIT_FAILURE_CODE);
+    }
+
     /* Родительский процесс */
-    pids[i] = pid;  // сохраняем PID дочернего процесса для последующего ожидания
-    
+    pids[i] = pid;
+
     /* Закрываем дескрипторы в родителе */
-    if (prev_pipe_read != -1) {  // если был открыт конец предыдущей трубы
-      close(prev_pipe_read);  // закрываем его — он больше не нужен родителю
-    }  // завершили закрытие предыдущей трубы в родителе
-    if (i < cmd_count - 1) {  // если создали новую трубу для следующей команды
-      close(pipe_fds[1]);  // родителю не нужен пишущий конец новой трубы
-      prev_pipe_read = pipe_fds[0];  // сохраним читающий конец для следующей итерации
-    }  // завершили подготовку дескрипторов для следующей итерации
-    
-    if (expanded_argv != argv) {  // если expand_env_vars выделил новые строки
-      for (int j = 0; j < argc; ++j) {  // перебираем аргументы
-        if (expanded_argv[j] != argv[j]) {  // освобождаем только те строки, что были пересозданы
+    if (prev_pipe_read != -1) {
+      close(prev_pipe_read);
+    }
+    if (i < cmd_count - 1) {
+      close(pipe_fds[1]);
+      prev_pipe_read = pipe_fds[0];
+    }
+
+    if (expanded_argv != argv) {
+      for (int j = 0; j < argc; ++j) {
+        if (expanded_argv[j] != argv[j]) {
           free(expanded_argv[j]);
         }
       }
-      free(expanded_argv);  // освобождаем массив указателей
-    }  // завершили освобождение временного массива аргументов
-    free(argv);  // освобождаем первоначально разобранный argv
-  }  // завершили запуск всех этапов конвейера
-  
+      free(expanded_argv);
+    }
+    free(argv);
+  }
+
   /* Ждём завершения всех процессов в конвейере, чтобы не оставить зомби */
-  for (int i = 0; i < cmd_count; ++i) {  // ожидаем завершения каждого дочернего процесса
-    int status;  // переменная для кода завершения
-    waitpid(pids[i], &status, 0);  // блокируемся, пока соответствующий процесс не завершится
-  }  // завершили ожидание всех процессов конвейера
-  
-  free(pids);  // освобождаем динамический массив PIDов
-  free(commands);  // освобождаем массив команд
-  free(line_copy);  // освобождаем копию исходной строки
-}  // завершение execute_pipeline
+  for (int i = 0; i < cmd_count; ++i) {
+    int status;
+    waitpid(pids[i], &status, 0);
+  }
+
+  free(pids);
+  free(commands);
+  free(line_copy);
+}
 
 /** ------------------------------------------------------------
  *  process_input_line:
  *  Обрабатывает одну строку ввода.
  * ------------------------------------------------------------ */
-void process_input_line(char* line) {  // разбираем и выполняем ровно одну считанную строку
-  size_t len = strlen(line);  // узнаём длину входной строки
-  if (len > 0 && line[len - 1] == '\n')  // проверяем, заканчивается ли она символом перевода строки
-    line[len - 1] = '\0';  // заменяем завершающий перевод строки на терминатор
-  while (*line == ' ' || *line == '\t')  // удаляем лидирующие пробелы и табы
-    line++;  // сдвигаем указатель на первый значимый символ
-  if (*line == '\0')  // если после очистки строка пуста
-    return;  // ничего выполнять не нужно
+void process_input_line(char* line) {
+  size_t len = strlen(line);
+  if (len > 0 && line[len - 1] == '\n')
+    line[len - 1] = '\0';
+  while (*line == ' ' || *line == '\t')
+    line++;
+  if (*line == '\0')
+    return;
 
-  if (strncmp(line, "cat", 3) == 0) {  // специальный случай: реализуем поведение cat без аргументов
-    char* after_cat = line + 3;  // переходим к символу сразу после слова "cat"
-    while (*after_cat == ' ' || *after_cat == '\t')  // пропускаем пробелы после команды
-      after_cat++;  // перемещаемся к потенциальным аргументам
-    if (*after_cat == '\0') {  // если аргументы отсутствуют
-      char* buffer = NULL;  // буфер для чтения строк из stdin
-      size_t buf_size = 0;  // текущий размер буфера getline
-      while (1) {  // читаем stdin до достижения EOF
-        ssize_t read_len = getline(&buffer, &buf_size, stdin);  // читаем очередную строку
-        if (read_len == -1)  // проверяем, не наступил ли конец файла или ошибка чтения
-          break;  // прекращаем копирование, если getline вернул -1
-        fwrite(buffer, 1, (size_t)read_len, stdout);  // передаём прочитанные данные в stdout
-        fflush(stdout);  // немедленно выталкиваем буфер, чтобы пользователь увидел вывод
+  if (strncmp(line, "cat", 3) == 0) {
+    char* after_cat = line + 3;
+    while (*after_cat == ' ' || *after_cat == '\t')
+      after_cat++;
+    if (*after_cat == '\0') {
+      char* buffer = NULL;
+      size_t buf_size = 0;
+      while (1) {
+        ssize_t read_len = getline(&buffer, &buf_size, stdin);
+        if (read_len == -1)
+          break;
+        fwrite(buffer, 1, (size_t)read_len, stdout);
+        fflush(stdout);
       }
-      free(buffer);  // освобождаем буфер, выделенный getline
-      return;  // завершаем обработку строки, так как работа команды cat окончена
+      free(buffer);
+      return;
     }
   }
 
   /* Проверяем, есть ли конвейер (|) */
-  if (has_pipe(line)) {  // если строка содержит символ конвейера
-    execute_pipeline(line);  // делегируем выполнение обработчику pipeline
-    return;  // дальнейшая обработка не требуется
+  if (has_pipe(line)) {
+    execute_pipeline(line);
+    return;
   }
 
-  execute_with_and(line);  // в остальных случаях выполняем последовательность команд с учётом && и фоновых запусков
+  execute_with_and(line);
 }
 
 /** ------------------------------------------------------------
  *  run_shell:
  *  Главный цикл shell — выделен отдельно от main
  * ------------------------------------------------------------ */
-void run_shell(void) {  // основной цикл чтения и выполнения команд
-  /* Отключаем буферизацию stdin чтобы дочерние процессы могли читать оставшиеся данные */
+void run_shell(void) {
+  /* Отключаем буферизацию stdin чтобы дочерние процессы могли читать оставшиеся
+   * данные */
   setvbuf(stdin, NULL, _IONBF, 0);
-  
-  char* input_line = NULL;  // указатель на буфер, который getline будет расширять при необходимости
-  size_t buffer_size = 0;  // текущий размер выделенного буфера (управляется getline)
 
-  while (1) {  // бесконечный цикл до получения EOF или команды выхода
-    if (isatty(STDIN_FILENO)) {  // проверяем, подключен ли stdin к терминалу
-      fputs(PROMPT_STRING, stdout);  // выводим приглашение только для интерактивных сеансов
-      fflush(stdout);  // принудительно сбрасываем буфер, чтобы приглашение появилось немедленно
+  char* input_line = NULL;
+
+  size_t buffer_size = 0;
+
+  while (1) {
+    if (isatty(STDIN_FILENO)) {
+      fputs(PROMPT_STRING, stdout);
+      fflush(stdout);
     }
 
-    ssize_t line_length = getline(&input_line, &buffer_size, stdin);  // читаем очередную строку от пользователя
-    if (line_length == -1) {  // если достигнут EOF или произошла ошибка чтения
-      if (isatty(STDIN_FILENO))  // убедимся, что мы на терминале, прежде чем печатать перевод строки
-        putchar('\n');  // добавляем перевод строки для аккуратного завершения интерактивного сеанса
-      break;  // выходим из основного цикла, завершая работу оболочки
+    ssize_t line_length = getline(&input_line, &buffer_size, stdin);
+    if (line_length == -1) {
+      if (isatty(STDIN_FILENO))
+
+        putchar('\n');
+
+      break;
     }
 
-    process_input_line(input_line);  // передаём строку на дальнейший разбор и выполнение
+    process_input_line(input_line);
   }
 }
 
-void execute_with_and(char* line) {  // выполняем последовательность команд, связанных оператором &&
+void execute_with_and(char* line) {
   /* Проверяем, есть ли & в конце (фоновое выполнение) */
-  int run_background = 0;  // по умолчанию запускаем в переднем плане
-  size_t len = strlen(line);  // длина исходной строки
-  if (len > 0 && line[len - 1] == '&') {  // если последним символом стоит '&'
+  int run_background = 0;
+  size_t len = strlen(line);
+  if (len > 0 && line[len - 1] == '&') {
     /* Проверяем, это не && */
-    if (len == 1 || line[len - 2] != '&') {  // убеждаемся, что это одиночный маркер фона
-      run_background = 1;  // помечаем, что последняя команда должна уйти в фон
-      line[len - 1] = '\0';  /* Удаляем & */
+    if (len == 1 || line[len - 2] != '&') {
+      run_background = 1;
+      line[len - 1] = '\0'; /* Удаляем & */
       /* Пропускаем пробелы перед & */
-      len--;  // сдвигаем эффективную длину строки после удаления символа
+      len--;
       while (len > 0 && (line[len - 1] == ' ' || line[len - 1] == '\t')) {
-        line[--len] = '\0';  // убираем хвостовые пробелы вслед за ampersand
-      }  // завершили очистку пробелов после сигнала фонового запуска
+        line[--len] = '\0';
+      }
     }
-  }  // завершили анализ хвостового '&'
-  
+  }
+
   /* Разбиваем на команды по && */
-  int cmd_count = 1;  // минимум одна команда
+  int cmd_count = 1;
   for (size_t i = 0; i < len; ++i) {
     if (i < len - 1 && line[i] == '&' && line[i + 1] == '&') {
-      ++cmd_count;  // нашли разделитель && — увеличиваем счётчик команд
+      ++cmd_count;
     }
   }
-  
-  char** commands = malloc((cmd_count + 1) * sizeof(char*));  // массив указателей на подкоманды
-  if (!commands) {  // проверяем успешность выделения памяти
-    perror("malloc");  // сообщаем об ошибке
-    return;  // прекращаем обработку последовательности
+
+  char** commands = malloc((cmd_count + 1) * sizeof(char*));
+  if (!commands) {
+    perror("malloc");
+    return;
   }
-  
+
   /* Извлекаем команды */
-  int cmd_idx = 0;  // индекс текущей подкоманды
-  char* cmd_start = line;  // указатель на начало текущего фрагмента
+  int cmd_idx = 0;
+  char* cmd_start = line;
   for (size_t i = 0; i <= len; ++i) {
-    if (i < len && i < len - 1 && line[i] == '&' && line[i + 1] == '&') {  // встретили оператор &&
+    if (i < len && i < len - 1 && line[i] == '&' && line[i + 1] == '&') {
       /* Найден && */
-      line[i] = '\0';  // разрываем строку, завершая текущую команду
-      commands[cmd_idx++] = cmd_start;  // сохраняем ссылку на команду
-      i += 1;  /* Пропускаем второй & */
-      cmd_start = &line[i + 1];  // смещаем начало на символ после оператора
-      i++;  // продвигаем счётчик цикла, чтобы не разбирать тот же символ повторно
+      line[i] = '\0';
+      commands[cmd_idx++] = cmd_start;
+      i += 1; /* Пропускаем второй & */
+      cmd_start = &line[i + 1];
+      i++;
+
     } else if (i == len) {
       /* Конец строки */
-      commands[cmd_idx++] = cmd_start;  // сохраняем последнюю команду
+      commands[cmd_idx++] = cmd_start;
     }
-  }  // завершили сегментацию по операторам &&
-  commands[cmd_count] = NULL;  // маркируем конец массива команд
-  
-  int last_status = 0;  // статус последней выполненной команды
-  pid_t bg_pid = -1;  // PID фонового процесса, если он будет создан
+  }
+  commands[cmd_count] = NULL;
 
-  for (int i = 0; i < cmd_count; ++i) {  // последовательно выполняем команды
-    char* current_cmd = commands[i];  // текущая подкоманда
-    
+  int last_status = 0;
+  pid_t bg_pid = -1;
+
+  for (int i = 0; i < cmd_count; ++i) {
+    char* current_cmd = commands[i];
+
     /* Пропускаем пробелы в начале */
     while (*current_cmd && (*current_cmd == ' ' || *current_cmd == '\t')) {
-      ++current_cmd;  // смещаем указатель, игнорируя ведущие пробелы
-    }  // завершили удаление ведущих пробелов текущей команды
-    
+      ++current_cmd;
+    }
+
     if (*current_cmd == '\0') {
-      continue;  // пустая команда — переходим к следующей
+      continue;
     }
 
     if (run_background && i == cmd_count - 1) {
       /* Запускаем в фоне - выполняем через fork без waitpid */
-      int argc = 0;  // количество аргументов в фоновой команде
-      char** argv = parse_command_line(current_cmd, &argc);  // разбираем аргументы фоновой команды
-      if (argv && argc > 0) {  // продолжаем только при успешном разборе
-    char** expanded_argv = expand_env_vars(argv, argc);  // раскрываем переменные окружения
-    bg_pid = fork();  // создаём отдельный процесс для фоновой команды
-    if (bg_pid == 0) {
+      int argc = 0;
+      char** argv = parse_command_line(current_cmd, &argc);
+      if (argv && argc > 0) {
+        char** expanded_argv = expand_env_vars(argv, argc);
+        bg_pid = fork();
+        if (bg_pid == 0) {
           /* Дочерний процесс */
-          redirect_info_t redir = apply_redirects(expanded_argv, &argc);  // вырезаем операторы перенаправления
-          
+          redirect_info_t redir = apply_redirects(expanded_argv, &argc);
+
           if (redir.stdin_fd >= 0) {
-            dup2(redir.stdin_fd, STDIN_FILENO);  // подменяем стандартный ввод файлом
+            dup2(redir.stdin_fd, STDIN_FILENO);
             close(redir.stdin_fd);
-          }  // завершили перенаправление stdin
+          }
           if (redir.stdout_fd >= 0) {
-            dup2(redir.stdout_fd, STDOUT_FILENO);  // перенаправляем stdout
+            dup2(redir.stdout_fd, STDOUT_FILENO);
             close(redir.stdout_fd);
-          }  // завершили перенаправление stdout
+          }
           if (redir.stderr_fd >= 0) {
-            dup2(redir.stderr_fd, STDERR_FILENO);  // перенаправляем stderr в файл
+            dup2(redir.stderr_fd, STDERR_FILENO);
             close(redir.stderr_fd);
           } else if (redir.redirect_stderr_to_stdout) {
-            dup2(STDOUT_FILENO, STDERR_FILENO);  // при 2>&1 направляем ошибки в stdout
-          }  // завершили настройку stderr
-          
-          execvp(expanded_argv[0], expanded_argv);  // запускаем команду в дочернем процессе
-          perror(expanded_argv[0]);  // если exec не удался, печатаем ошибку
-          _exit(EXIT_FAILURE_CODE);  // завершаем ребёнка с кодом ошибки
+            dup2(STDOUT_FILENO, STDERR_FILENO);
+          }
+
+          execvp(expanded_argv[0], expanded_argv);
+          perror(expanded_argv[0]);
+          _exit(EXIT_FAILURE_CODE);
         } else if (bg_pid > 0) {
           /* Родительский процесс - выводим PID */
-          fprintf(stderr, "[%d]\n", (int)bg_pid);  // сообщаем пользователю PID фоновой задачи
-        }  // завершили обработку ветки родителя при запуске фоновой команды
-        
+          fprintf(stderr, "[%d]\n", (int)bg_pid);
+        }
+
         if (expanded_argv != argv) {
           for (int j = 0; j < argc; ++j) {
             if (expanded_argv[j] != argv[j]) {
-              free(expanded_argv[j]);  // освобождаем строки, созданные expand_env_vars
+              free(expanded_argv[j]);
             }
           }
-          free(expanded_argv);  // освобождаем массив расширенных аргументов
-        }  // завершили очистку расширенных аргументов для фоновой команды
-        free(argv);  // освобождаем исходный argv
-      }  // завершили обработку аргументов фоновой команды
-    }  // завершили обработку фоновой команды (если она была запрошена)
-    else {
-      last_status = execute_single_command(current_cmd);  // выполняем команду в основном потоке
+          free(expanded_argv);
+        }
+        free(argv);
+      }
+    } else {
+      last_status = execute_single_command(current_cmd);
       if (last_status != 0)
-        break;  // при ошибке прекращаем выполнение последующих команд
+        break;
     }
-  }  // завершили обработку всех команд, разделённых &&
-  
-  free(commands);  // освобождаем массив подкоманд
-}  // завершение execute_with_and
+  }
+
+  free(commands);
+}
 
 int execute_command(char** argv) {
-  if (!argv || !argv[0]) return 0;
+  if (!argv || !argv[0])
+    return 0;
 
   if (strcmp(argv[0], "exit") == 0) {
     exit(EXIT_SUCCESS_CODE);
   }
   if (strcmp(argv[0], "cd") == 0) {
     const char* target = argv[1] ? argv[1] : getenv("HOME");
-    if (chdir(target) != 0) fprintf(stderr, "cd: %s: %s\n", target, strerror(errno));
+    if (chdir(target) != 0)
+      fprintf(stderr, "cd: %s: %s\n", target, strerror(errno));
     return 0;
   }
 
   /* Обработка редиректов */
   int argc_temp = 0;
-  for (int i = 0; argv[i] != NULL; ++i) ++argc_temp;
+  for (int i = 0; argv[i] != NULL; ++i)
+    ++argc_temp;
   redirect_info_t redir = apply_redirects(argv, &argc_temp);
   if (redir.stdin_fd == -2 || redir.stdout_fd == -2 || redir.stderr_fd == -2) {
     puts("I/O error");
-    if (redir.stdin_fd >= 0) close(redir.stdin_fd);
-    if (redir.stdout_fd >= 0) close(redir.stdout_fd);
-    if (redir.stderr_fd >= 0) close(redir.stderr_fd);
+    if (redir.stdin_fd >= 0)
+      close(redir.stdin_fd);
+    if (redir.stdout_fd >= 0)
+      close(redir.stdout_fd);
+    if (redir.stderr_fd >= 0)
+      close(redir.stderr_fd);
     return 0;
   }
 
   if (argc_temp == 0 || argv[0] == NULL) {
-    if (redir.stdin_fd >= 0) close(redir.stdin_fd);
-    if (redir.stdout_fd >= 0) close(redir.stdout_fd);
-    if (redir.stderr_fd >= 0) close(redir.stderr_fd);
+    if (redir.stdin_fd >= 0)
+      close(redir.stdin_fd);
+    if (redir.stdout_fd >= 0)
+      close(redir.stdout_fd);
+    if (redir.stderr_fd >= 0)
+      close(redir.stderr_fd);
     return EXIT_FAILURE_CODE;
   }
 
   pid_t pid = fork();
   if (pid < 0) {
     perror("fork");
-    if (redir.stdin_fd >= 0) close(redir.stdin_fd);
-    if (redir.stdout_fd >= 0) close(redir.stdout_fd);
-    if (redir.stderr_fd >= 0) close(redir.stderr_fd);
+    if (redir.stdin_fd >= 0)
+      close(redir.stdin_fd);
+    if (redir.stdout_fd >= 0)
+      close(redir.stdout_fd);
+    if (redir.stderr_fd >= 0)
+      close(redir.stderr_fd);
     return EXIT_FAILURE_CODE;
   }
   if (pid == 0) {
-    if (redir.stdin_fd >= 0) { dup2(redir.stdin_fd, STDIN_FILENO); close(redir.stdin_fd); }
-    if (redir.stdout_fd >= 0) { dup2(redir.stdout_fd, STDOUT_FILENO); close(redir.stdout_fd); }
-    if (redir.stderr_fd >= 0) { dup2(redir.stderr_fd, STDERR_FILENO); close(redir.stderr_fd); }
-    else if (redir.redirect_stderr_to_stdout) { dup2(STDOUT_FILENO, STDERR_FILENO); }
+    if (redir.stdin_fd >= 0) {
+      dup2(redir.stdin_fd, STDIN_FILENO);
+      close(redir.stdin_fd);
+    }
+    if (redir.stdout_fd >= 0) {
+      dup2(redir.stdout_fd, STDOUT_FILENO);
+      close(redir.stdout_fd);
+    }
+    if (redir.stderr_fd >= 0) {
+      dup2(redir.stderr_fd, STDERR_FILENO);
+      close(redir.stderr_fd);
+    } else if (redir.redirect_stderr_to_stdout) {
+      dup2(STDOUT_FILENO, STDERR_FILENO);
+    }
     execvp(argv[0], argv);
     /* execvp failed - check if command not found */
     if (errno == ENOENT) {
@@ -723,11 +764,15 @@ int execute_command(char** argv) {
   int status = 0;
   waitpid(pid, &status, 0);
 
-  if (redir.stdin_fd >= 0) close(redir.stdin_fd);
-  if (redir.stdout_fd >= 0) close(redir.stdout_fd);
-  if (redir.stderr_fd >= 0) close(redir.stderr_fd);
+  if (redir.stdin_fd >= 0)
+    close(redir.stdin_fd);
+  if (redir.stdout_fd >= 0)
+    close(redir.stdout_fd);
+  if (redir.stderr_fd >= 0)
+    close(redir.stderr_fd);
 
-  if (WIFEXITED(status)) return WEXITSTATUS(status);
+  if (WIFEXITED(status))
+    return WEXITSTATUS(status);
   return EXIT_FAILURE_CODE;
 }
 
@@ -750,55 +795,58 @@ int execute_single_command(char* command) {
    * 3. Два редиректа одного типа (например ">foo > bar" или "<one ... <bar")
    * 4. Токен >>filename (слитно) — синтаксическая ошибка
    */
-  
-  int stdout_redir_count = 0;  /* Счётчик > и >> */
-  int stdin_redir_count = 0;   /* Счётчик < */
-  
+
+  int stdout_redir_count = 0; /* Счётчик > и >> */
+  int stdin_redir_count = 0;  /* Счётчик < */
+
   for (int i = 0; i < argc; ++i) {
     const char* t = argv[i];
-    
+
     /* Токен >>filename (слитно без пробела) — синтаксическая ошибка */
     if (strncmp(t, ">>", 2) == 0 && strlen(t) > 2) {
       puts("Syntax error");
       for (int j = 0; j < argc; ++j) {
-        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 &&
-            strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 &&
-            strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
+        if (argv[j] && strcmp(argv[j], ">") != 0 &&
+            strcmp(argv[j], ">>") != 0 && strcmp(argv[j], "<") != 0 &&
+            strcmp(argv[j], "|") != 0 && strcmp(argv[j], "&") != 0 &&
+            strcmp(argv[j], "2>&1") != 0) {
           free(argv[j]);
         }
       }
       free(argv);
       return 0;
     }
-    
+
     /* Редирект в конце без файла */
     if (is_redir(t) && i + 1 >= argc) {
       puts("Syntax error");
       for (int j = 0; j < argc; ++j) {
-        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 &&
-            strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 &&
-            strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
+        if (argv[j] && strcmp(argv[j], ">") != 0 &&
+            strcmp(argv[j], ">>") != 0 && strcmp(argv[j], "<") != 0 &&
+            strcmp(argv[j], "|") != 0 && strcmp(argv[j], "&") != 0 &&
+            strcmp(argv[j], "2>&1") != 0) {
           free(argv[j]);
         }
       }
       free(argv);
       return 0;
     }
-    
+
     /* Два редиректа подряд */
     if (is_redir(t) && i + 1 < argc && is_redir(argv[i + 1])) {
       puts("Syntax error");
       for (int j = 0; j < argc; ++j) {
-        if (argv[j] && strcmp(argv[j], ">") != 0 && strcmp(argv[j], ">>") != 0 &&
-            strcmp(argv[j], "<") != 0 && strcmp(argv[j], "|") != 0 &&
-            strcmp(argv[j], "&") != 0 && strcmp(argv[j], "2>&1") != 0) {
+        if (argv[j] && strcmp(argv[j], ">") != 0 &&
+            strcmp(argv[j], ">>") != 0 && strcmp(argv[j], "<") != 0 &&
+            strcmp(argv[j], "|") != 0 && strcmp(argv[j], "&") != 0 &&
+            strcmp(argv[j], "2>&1") != 0) {
           free(argv[j]);
         }
       }
       free(argv);
       return 0;
     }
-    
+
     /* Подсчитываем редиректы */
     if (strcmp(t, ">") == 0 || strcmp(t, ">>") == 0) {
       stdout_redir_count++;
@@ -807,7 +855,7 @@ int execute_single_command(char* command) {
       stdin_redir_count++;
     }
   }
-  
+
   /* Два редиректа stdout (">foo > bar") или два stdin ("<one ... <bar") */
   if (stdout_redir_count > 1 || stdin_redir_count > 1) {
     puts("Syntax error");
@@ -824,7 +872,7 @@ int execute_single_command(char* command) {
 
   char** expanded_argv = expand_env_vars(argv, argc);
   int status = execute_command(expanded_argv);
-  
+
   if (expanded_argv != argv) {
     for (int i = 0; i < argc; ++i) {
       if (expanded_argv[i] != argv[i]) {
@@ -833,7 +881,7 @@ int execute_single_command(char* command) {
     }
     free(expanded_argv);
   }
-  
+
   free(argv);
   return status;
 }
@@ -841,11 +889,13 @@ int execute_single_command(char* command) {
 // Вспомогательная функция для проверки, является ли токен оператором редиректа
 int is_redir(const char* t) {
   const char* redirs[] = {">", ">>", "<"};
-  for (int i = 0; i < 3; ++i) if (strcmp(t, redirs[i]) == 0) return 1;
+  for (int i = 0; i < 3; ++i)
+    if (strcmp(t, redirs[i]) == 0)
+      return 1;
   return 0;
 }
 
-int main(void) {  // точка входа программы оболочки
-  run_shell();  // запускаем основной цикл обработки пользовательских команд
+int main(void) {
+  run_shell();
   return EXIT_SUCCESS_CODE;
 }
