@@ -428,9 +428,9 @@ void execute_pipeline(char* line) {
     /* Расширяем переменные окружения */
     char** expanded_argv = expand_env_vars(argv, argc);
 
-    pid_t pid = fork();
+    pid_t pid = vfork();
     if (pid < 0) {
-      perror("fork");
+      perror("vfork");
       free(expanded_argv);
       if (expanded_argv != argv)
         free(argv);
@@ -677,12 +677,12 @@ void execute_with_and(char* line) {
     }
 
     if (run_background && i == cmd_count - 1) {
-      /* Запускаем в фоне - выполняем через fork без waitpid */
+      /* Запускаем в фоне - выполняем через vfork без waitpid */
       int argc = 0;
       char** argv = parse_command_line(current_cmd, &argc);
       if (argv && argc > 0) {
         char** expanded_argv = expand_env_vars(argv, argc);
-        bg_pid = fork();
+        bg_pid = vfork();
         if (bg_pid == 0) {
           /* Дочерний процесс */
           redirect_info_t redir = apply_redirects(expanded_argv, &argc);
@@ -770,9 +770,9 @@ int execute_command(char** argv) {
     return EXIT_FAILURE_CODE;
   }
 
-  pid_t pid = fork();
+  pid_t pid = vfork();
   if (pid < 0) {
-    perror("fork");
+    perror("vfork");
     if (redir.stdin_fd >= 0)
       close(redir.stdin_fd);
     if (redir.stdout_fd >= 0)
